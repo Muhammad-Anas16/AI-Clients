@@ -1,48 +1,146 @@
-// C:\Users\OFFICE-PC2\Desktop\AI-client\desktop\src\services\realtimeVoice.js
+import api, { WS_BASE_URL } from "./api.js";
 
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+// ============================================================
+// REALTIME VOICE
+// ============================================================
 
-import api from "./api.js";
+const WS_URL = `${WS_BASE_URL}/ws/voice`;
 
-// CONFIG
-const WS_URL = "ws://127.0.0.1:3000/ws/voice";
+const TARGET_SAMPLE_RATE = 16000;
 
-// STATE
 let socket = null;
 
-let unlistenMic = null;
-let unlistenMicError = null;
+let audioContext = null;
+let mediaStream = null;
+let mediaSource = null;
+let processor = null;
+let silentGain = null;
 
 let running = false;
 let processing = false;
+
 let currentAudio = null;
+
 let currentHandlers = {};
 
-// BASE64 -> ARRAY BUFFER
-function base64ToArrayBuffer(base64) {
-  const binary = atob(base64);
-
-  const bytes = new Uint8Array(binary.length);
-
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-
-  return bytes.buffer;
-}
-
 // ============================================================
-// SEND EVENT TO APP
+// EVENTS
 // ============================================================
 
 function emitEvent(event) {
-  if (currentHandlers && typeof currentHandlers.onEvent === "function") {
+  if (typeof currentHandlers.onEvent === "function") {
     currentHandlers.onEvent(event);
   }
 }
 
-// PLAY JARVIS AUDIO
+// ============================================================
+// FLOAT -> PCM16
+// ============================================================
+
+function floatTo16BitPCM(float32) {
+  const output = new Int16Array(float32.length);
+
+  for (let i = 0; i < float32.length; i += 1) {
+    const sample = Math.max(-1, Math.min(1, float32[i]));
+
+    output[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+  }
+
+  return output;
+}
+
+// ============================================================
+// DOWNSAMPLE
+// ============================================================
+
+function downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
+  if (inputSampleRate === outputSampleRate) {
+    return buffer;
+  }
+
+  if (outputSampleRate > inputSampleRate) {
+    throw new Error(
+      `Microphone sample rate ${inputSampleRate}Hz is below required ${outputSampleRate}Hz.`,
+    );
+  }
+
+  const ratio = inputSampleRate / outputSampleRate;
+
+  const newLength = Math.round(buffer.length / ratio);
+
+  const result = new Float32Array(newLength);
+
+  let resultOffset = 0;
+  let bufferOffset = 0;
+
+  while (resultOffset < result.length) {
+    const nextOffset = Math.round((resultOffset + 1) * ratio);
+
+    let accumulator = 0;
+    let count = 0;
+
+    for (let i = bufferOffset; i < nextOffset && i < buffer.length; i += 1) {
+      accumulator += buffer[i];
+
+      count += 1;
+    }
+
+    result[resultOffset] = count > 0 ? accumulator / count : 0;
+
+    resultOffset += 1;
+    bufferOffset = nextOffset;
+  }
+
+  return result;
+}
+
+// ============================================================
+// SEND PCM
+// ============================================================
+
+function sendPcmFloat32(float32, inputSampleRate) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  try {
+    const mono16k = downsampleBuffer(
+      float32,
+      inputSampleRate,
+      TARGET_SAMPLE_RATE,
+    );
+
+    const pcm16 = floatTo16BitPCM(mono16k);
+
+    socket.send(pcm16.buffer);
+  } catch (error) {
+    emitEvent({
+      type: "error",
+      message: error?.message || "Could not send microphone audio.",
+    });
+  }
+}
+
+// ============================================================
+// AUDIO PLAYBACK
+// ============================================================
+
+function stopCurrentAudio() {
+  if (!currentAudio) {
+    return;
+  }
+
+  try {
+    currentAudio.pause();
+  } catch {}
+
+  try {
+    currentAudio.currentTime = 0;
+  } catch {}
+
+  currentAudio = null;
+}
+
 function playAndWait(blob) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(blob);
@@ -54,7 +152,9 @@ function playAndWait(blob) {
     let finished = false;
 
     function cleanup() {
-      if (finished) return;
+      if (finished) {
+        return;
+      }
 
       finished = true;
 
@@ -62,7 +162,9 @@ function playAndWait(blob) {
         URL.revokeObjectURL(url);
       } catch {}
 
-      currentAudio = null;
+      if (currentAudio === audio) {
+        currentAudio = null;
+      }
     }
 
     audio.onended = () => {
@@ -90,30 +192,124 @@ function playAndWait(blob) {
   });
 }
 
-// STOP CURRENT AUDIO
-function stopCurrentAudio() {
-  if (!currentAudio) {
-    return;
-  }
+// ============================================================
+// MICROPHONE START
+// ============================================================
 
-  try {
-    currentAudio.pause();
-  } catch {}
-
-  try {
-    currentAudio.currentTime = 0;
-  } catch {}
-
-  currentAudio = null;
-}
-
-// RUN COMMAND AFTER WAKE WORD
-async function runCommand(command) {
+async function startMicrophone() {
   if (!running) {
     return;
   }
 
-  if (processing) {
+  if (mediaStream) {
+    return;
+  }
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error("Microphone access is not available in this WebView.");
+  }
+
+  mediaStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+    video: false,
+  });
+
+  audioContext = new AudioContext();
+
+  if (audioContext.state === "suspended") {
+    await audioContext.resume();
+  }
+
+  mediaSource = audioContext.createMediaStreamSource(mediaStream);
+
+  processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+  processor.onaudioprocess = (event) => {
+    if (!running || processing) {
+      return;
+    }
+
+    const input = event.inputBuffer.getChannelData(0);
+
+    const copy = new Float32Array(input.length);
+
+    copy.set(input);
+
+    sendPcmFloat32(copy, audioContext.sampleRate);
+  };
+
+  silentGain = audioContext.createGain();
+
+  silentGain.gain.value = 0;
+
+  mediaSource.connect(processor);
+
+  processor.connect(silentGain);
+
+  silentGain.connect(audioContext.destination);
+}
+
+// ============================================================
+// MICROPHONE STOP
+// ============================================================
+
+async function stopMicrophone() {
+  if (processor) {
+    try {
+      processor.disconnect();
+    } catch {}
+
+    processor.onaudioprocess = null;
+
+    processor = null;
+  }
+
+  if (mediaSource) {
+    try {
+      mediaSource.disconnect();
+    } catch {}
+
+    mediaSource = null;
+  }
+
+  if (silentGain) {
+    try {
+      silentGain.disconnect();
+    } catch {}
+
+    silentGain = null;
+  }
+
+  if (mediaStream) {
+    for (const track of mediaStream.getTracks()) {
+      try {
+        track.stop();
+      } catch {}
+    }
+
+    mediaStream = null;
+  }
+
+  if (audioContext) {
+    try {
+      await audioContext.close();
+    } catch {}
+
+    audioContext = null;
+  }
+}
+
+// ============================================================
+// RUN COMMAND
+// ============================================================
+
+async function runCommand(command) {
+  if (!running || processing) {
     return;
   }
 
@@ -125,8 +321,7 @@ async function runCommand(command) {
 
   processing = true;
 
-  // Stop microphone while AI is thinking.
-  await invoke("stop_microphone").catch(() => {});
+  await stopMicrophone();
 
   emitEvent({
     type: "state",
@@ -144,14 +339,14 @@ async function runCommand(command) {
 
     const answer = response?.data?.answer || "";
 
+    if (!answer) {
+      throw new Error("LLaMA returned an empty answer.");
+    }
+
     emitEvent({
       type: "answer",
       text: answer,
     });
-
-    if (!answer) {
-      throw new Error("LLaMA returned an empty answer.");
-    }
 
     // Piper
     emitEvent({
@@ -178,42 +373,130 @@ async function runCommand(command) {
       return;
     }
 
-    // Start listening again automatically.
-    emitEvent({
-      type: "state",
-      state: "waiting_for_wake_word",
-    });
+    try {
+      await startMicrophone();
 
-    await startNativeMicrophone();
+      emitEvent({
+        type: "state",
+        state: "waiting_for_wake_word",
+      });
+    } catch (error) {
+      emitEvent({
+        type: "error",
+        message: error?.message || "Could not restart microphone.",
+      });
+
+      emitEvent({
+        type: "state",
+        state: "error",
+      });
+    }
   }
 }
 
-// START NATIVE MICROPHONE
-async function startNativeMicrophone() {
-  if (!running) {
+// ============================================================
+// SERVER MESSAGE
+// ============================================================
+
+function handleServerMessage(message) {
+  if (!message || typeof message !== "object") {
+    return;
+  }
+
+  switch (message.type) {
+    case "voice:connecting":
+      emitEvent({
+        type: "state",
+        state: "connecting_voice",
+      });
+      break;
+
+    case "voice:ready":
+      emitEvent({
+        type: "state",
+        state: "waiting_for_wake_word",
+      });
+      break;
+
+    case "voice:wake":
+      emitEvent({
+        type: "state",
+        state: "wake_detected",
+      });
+
+      emitEvent({
+        type: "wake",
+        text: message.text || "Jarvis",
+      });
+      break;
+
+    case "voice:partial":
+      emitEvent({
+        type: "partial",
+        text: message.text || "",
+      });
+      break;
+
+    case "voice:command":
+      void runCommand(message.text || "");
+      break;
+
+    case "voice:error":
+      emitEvent({
+        type: "error",
+        message: message.message || "Realtime Vosk error.",
+      });
+      break;
+
+    case "voice:state":
+      emitEvent({
+        type: "state",
+        state: message.state || "unknown",
+      });
+      break;
+
+    case "pong":
+      emitEvent({
+        type: "pong",
+      });
+      break;
+
+    default:
+      console.log("[JARVIS] Unknown voice event:", message);
+  }
+}
+
+// ============================================================
+// CLOSE SOCKET
+// ============================================================
+
+function closeSocket() {
+  if (!socket) {
     return;
   }
 
   try {
-    await invoke("start_microphone");
-  } catch (error) {
-    emitEvent({
-      type: "error",
-      message: error?.toString() || "Could not start microphone.",
-    });
-  }
-}
-
-// STOP NATIVE MICROPHONE
-async function stopNativeMicrophone() {
-  try {
-    await invoke("stop_microphone");
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(
+        JSON.stringify({
+          type: "stop",
+        }),
+      );
+    }
   } catch {}
+
+  try {
+    socket.close();
+  } catch {}
+
+  socket = null;
 }
 
-// CONNECT REALTIME VOICE
-export async function startRealtimeVoice(onEvent = () => {}) {
-  // Already running
+// ============================================================
+// START
+// ============================================================
+
+async function startRealtimeVoice(onEvent = () => {}) {
   if (running) {
     emitEvent({
       type: "state",
@@ -235,259 +518,117 @@ export async function startRealtimeVoice(onEvent = () => {}) {
     state: "connecting_voice",
   });
 
-  // Create WebSocket
-  socket = new WebSocket(WS_URL);
+  try {
+    socket = new WebSocket(WS_URL);
 
-  socket.binaryType = "arraybuffer";
-  // WebSocket OPEN
-  socket.onopen = async () => {
-    if (!running) {
-      return;
-    }
+    socket.binaryType = "arraybuffer";
 
-    emitEvent({
-      type: "state",
-      state: "connecting_voice",
-    });
-
-    try {
-      // Listen for PCM microphone chunks
-      unlistenMic = await listen("mic:pcm", (event) => {
-        if (!running) {
-          return;
-        }
-
-        if (processing) {
-          return;
-        }
-
-        if (!socket) {
-          return;
-        }
-
-        if (socket.readyState !== WebSocket.OPEN) {
-          return;
-        }
-
-        const payload = event?.payload;
-
-        if (!payload?.data) {
-          return;
-        }
-
-        try {
-          const pcm = base64ToArrayBuffer(payload.data);
-
-          socket.send(pcm);
-        } catch (error) {
-          emitEvent({
-            type: "error",
-            message: error?.message || "Could not send microphone audio.",
-          });
-        }
-      });
-
-      // Microphone errors
-      unlistenMicError = await listen("mic:error", (event) => {
-        emitEvent({
-          type: "error",
-          message: event?.payload?.message || "Microphone error.",
-        });
-      });
-
-      // Start native microphone
-      await startNativeMicrophone();
-    } catch (error) {
-      emitEvent({
-        type: "error",
-        message:
-          error?.message ||
-          error?.toString() ||
-          "Could not start realtime microphone.",
-      });
-
-      await stopRealtimeVoice();
-    }
-  };
-
-  // WebSocket MESSAGE
-  socket.onmessage = async (event) => {
-    if (!running) {
-      return;
-    }
-
-    try {
-      const message =
-        typeof event.data === "string" ? JSON.parse(event.data) : null;
-
-      if (!message) {
+    socket.onopen = async () => {
+      if (!running) {
         return;
       }
 
-      // Server ready
-      if (message.type === "voice:ready") {
+      try {
+        await startMicrophone();
+
         emitEvent({
           type: "state",
           state: "waiting_for_wake_word",
         });
-
-        return;
-      }
-      // Wake word detected
-      if (message.type === "voice:wake") {
-        emitEvent({
-          type: "state",
-          state: "wake_detected",
-        });
-
-        emitEvent({
-          type: "wake",
-          text: message.text || "Jarvis",
-        });
-
-        return;
-      }
-      // Partial Vosk text
-      if (message.type === "voice:partial") {
-        emitEvent({
-          type: "partial",
-          text: message.text || "",
-        });
-
-        return;
-      }
-      // Final command
-      if (message.type === "voice:command") {
-        await runCommand(message.text || "");
-
-        return;
-      }
-
-      // Voice error
-      if (message.type === "voice:error") {
+      } catch (error) {
         emitEvent({
           type: "error",
-          message: message.message || "Realtime Vosk error.",
+          message: error?.message || "Could not start microphone.",
         });
 
-        return;
+        await stopRealtimeVoice();
       }
-      // Server state
-      if (message.type === "voice:state") {
+    };
+
+    socket.onmessage = (event) => {
+      try {
+        if (typeof event.data !== "string") {
+          return;
+        }
+
+        const message = JSON.parse(event.data);
+
+        handleServerMessage(message);
+      } catch (error) {
         emitEvent({
-          type: "state",
-          state: message.state || "unknown",
-        });
-
-        return;
-      }
-
-      // Ping response
-      if (message.type === "pong") {
-        emitEvent({
-          type: "pong",
+          type: "error",
+          message: error?.message || "Invalid realtime server message.",
         });
       }
-    } catch (error) {
+    };
+
+    socket.onerror = () => {
       emitEvent({
         type: "error",
-        message: error?.message || "Invalid realtime server message.",
+        message: `Realtime voice connection failed: ${WS_URL}`,
       });
-    }
-  };
+    };
 
-  // WebSocket ERROR
-  socket.onerror = () => {
-    emitEvent({
-      type: "error",
-      message: "Realtime voice WebSocket connection failed.",
-    });
-  };
+    socket.onclose = (event) => {
+      if (!running) {
+        return;
+      }
 
-  // WebSocket CLOSE
-  socket.onclose = () => {
-    if (!running) {
-      return;
-    }
+      emitEvent({
+        type: "error",
+        message: `Realtime voice connection closed (code ${event.code}).`,
+      });
 
-    emitEvent({
-      type: "error",
-      message: "Realtime voice connection closed.",
-    });
+      emitEvent({
+        type: "state",
+        state: "error",
+      });
+    };
+  } catch (error) {
+    running = false;
+    currentHandlers = {};
 
-    emitEvent({
-      type: "state",
-      state: "error",
-    });
-  };
+    closeSocket();
+
+    throw error;
+  }
 }
 
-// STOP EVERYTHING
-export async function stopRealtimeVoice() {
+// ============================================================
+// STOP
+// ============================================================
+
+async function stopRealtimeVoice() {
   running = false;
   processing = false;
 
-  // Stop audio
   stopCurrentAudio();
 
-  // Stop microphone
-  await stopNativeMicrophone();
+  await stopMicrophone();
 
-  // Remove Tauri microphone listeners
-  if (unlistenMic) {
-    try {
-      await unlistenMic();
-    } catch {}
-
-    unlistenMic = null;
-  }
-
-  if (unlistenMicError) {
-    try {
-      await unlistenMicError();
-    } catch {}
-
-    unlistenMicError = null;
-  }
-
-  // Close websocket
-  if (socket) {
-    try {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(
-          JSON.stringify({
-            type: "stop",
-          }),
-        );
-      }
-    } catch {}
-
-    try {
-      socket.close();
-    } catch {}
-
-    socket = null;
-  }
+  closeSocket();
 
   currentHandlers = {};
 }
 
-// CONNECTION STATUS
-export function isRealtimeVoiceRunning() {
+// ============================================================
+// STATUS
+// ============================================================
+
+function isRealtimeVoiceRunning() {
   return running;
 }
 
-export function isRealtimeVoiceProcessing() {
+function isRealtimeVoiceProcessing() {
   return processing;
 }
 
-// MANUAL PING
-export function pingRealtimeVoice() {
-  if (!socket) {
-    return false;
-  }
+// ============================================================
+// PING
+// ============================================================
 
-  if (socket.readyState !== WebSocket.OPEN) {
+function pingRealtimeVoice() {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
     return false;
   }
 
@@ -499,6 +640,10 @@ export function pingRealtimeVoice() {
 
   return true;
 }
+
+// ============================================================
+// DEFAULT EXPORT
+// ============================================================
 
 const realtimeVoice = {
   startRealtimeVoice,

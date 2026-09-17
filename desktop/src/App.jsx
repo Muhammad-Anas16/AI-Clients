@@ -2,31 +2,19 @@ import { useCallback, useEffect, useState } from "react";
 import "./App.css";
 
 import api from "./services/api.js";
-import {
-  startRealtimeVoice,
-  stopRealtimeVoice,
-} from "./services/realtimeVoice.js";
+import realtimeVoice from "./services/realtimeVoice.js";
 
 function App() {
   const [serverOnline, setServerOnline] = useState(false);
-
   const [voiceState, setVoiceState] = useState("starting");
-
   const [partialText, setPartialText] = useState("");
-
   const [commandText, setCommandText] = useState("");
-
   const [answerText, setAnswerText] = useState("");
-
   const [errorText, setErrorText] = useState("");
-
   const [manualPrompt, setManualPrompt] = useState("");
-
   const [manualLoading, setManualLoading] = useState(false);
-
   const [screenshotLoading, setScreenshotLoading] = useState(false);
 
-  // VOICE EVENTS
   const handleVoiceEvent = useCallback((event) => {
     if (!event) return;
 
@@ -39,6 +27,10 @@ function App() {
         setPartialText(event.text || "");
         break;
 
+      case "wake":
+        setVoiceState("wake_detected");
+        break;
+
       case "command":
         setCommandText(event.text || "");
         setPartialText("");
@@ -49,7 +41,7 @@ function App() {
         break;
 
       case "error":
-        setErrorText(event.message || "Voice error");
+        setErrorText(event.message || "Voice error.");
         setVoiceState("error");
         break;
 
@@ -57,9 +49,10 @@ function App() {
         break;
     }
   }, []);
-  // START JARVIS
+
   const startJarvis = useCallback(async () => {
     setErrorText("");
+    setPartialText("");
     setVoiceState("connecting");
 
     try {
@@ -69,53 +62,61 @@ function App() {
         setServerOnline(false);
         setVoiceState("server_offline");
 
-        throw new Error("JARVIS server is not running.");
+        throw new Error(
+          `JARVIS server is not reachable at ${api.API_BASE_URL}.`,
+        );
       }
 
       setServerOnline(true);
 
-      await startRealtimeVoice(handleVoiceEvent);
+      await realtimeVoice.startRealtimeVoice(handleVoiceEvent);
     } catch (error) {
-      setServerOnline(false);
       setVoiceState("error");
 
       setErrorText(error?.message || "Could not start JARVIS.");
     }
   }, [handleVoiceEvent]);
 
-  // STOP JARVIS
   const stopJarvis = useCallback(async () => {
     try {
-      await stopRealtimeVoice();
-    } catch {}
+      await realtimeVoice.stopRealtimeVoice();
+    } catch (error) {
+      setErrorText(error?.message || "Could not stop JARVIS.");
+    }
 
     setVoiceState("stopped");
     setPartialText("");
   }, []);
-  // INITIAL START
+
   useEffect(() => {
     let mounted = true;
-    let timer = null;
 
     async function boot() {
-      for (let attempt = 0; attempt < 30 && mounted; attempt += 1) {
-        try {
-          const online = await api.checkServer();
+      setVoiceState("starting");
+      setErrorText("");
 
-          if (online) {
-            setServerOnline(true);
+      for (let attempt = 0; attempt < 10 && mounted; attempt += 1) {
+        const online = await api.checkServer();
 
-            await startRealtimeVoice(handleVoiceEvent);
+        if (online) {
+          if (!mounted) return;
 
-            return;
+          setServerOnline(true);
+
+          try {
+            await realtimeVoice.startRealtimeVoice(handleVoiceEvent);
+          } catch (error) {
+            if (!mounted) return;
+
+            setVoiceState("error");
+
+            setErrorText(error?.message || "Could not start JARVIS voice.");
           }
-        } catch {
-          // Server may still be starting.
+
+          return;
         }
 
-        await new Promise((resolve) => {
-          timer = setTimeout(resolve, 1000);
-        });
+        await new Promise((resolve) => setTimeout(resolve, 1000));
       }
 
       if (mounted) {
@@ -129,15 +130,10 @@ function App() {
     return () => {
       mounted = false;
 
-      if (timer) {
-        clearTimeout(timer);
-      }
-
-      stopRealtimeVoice().catch(() => {});
+      realtimeVoice.stopRealtimeVoice().catch(() => {});
     };
   }, [handleVoiceEvent]);
 
-  // MANUAL TEXT CHAT
   async function sendChat() {
     const prompt = manualPrompt.trim();
 
@@ -155,7 +151,7 @@ function App() {
 
       const answer = response?.data?.answer || "";
 
-      setAnswerText(answer);
+      setAnswerText(answer || "Server returned no answer.");
     } catch (error) {
       setErrorText(error?.message || "LLaMA request failed.");
     } finally {
@@ -163,7 +159,6 @@ function App() {
     }
   }
 
-  // SCREENSHOT + OCR
   async function readScreen() {
     if (screenshotLoading) {
       return;
@@ -181,7 +176,10 @@ function App() {
         language: "eng",
       });
 
-      const answer = response?.data?.llamaAnswer || response?.data?.text || "";
+      const answer =
+        response?.data?.llamaAnswer ||
+        response?.data?.text ||
+        "No OCR/LLaMA answer returned.";
 
       setAnswerText(answer);
     } catch (error) {
@@ -191,7 +189,6 @@ function App() {
     }
   }
 
-  // STATUS TEXT
   function readableState(state) {
     const states = {
       starting: "Starting...",
@@ -211,13 +208,14 @@ function App() {
   }
 
   const listening = voiceState === "waiting_for_wake_word";
+
   const thinking = voiceState === "thinking";
+
   const speaking = voiceState === "speaking";
 
   return (
     <main className="app">
       <section className="card">
-        {/* HEADER */}
         <div className="top">
           <div>
             <p className="eyebrow">JARVIS</p>
@@ -227,19 +225,19 @@ function App() {
 
           <div className={`dot ${serverOnline ? "online" : ""}`} />
         </div>
-        {/* SERVER STATUS */}
+
         <div className="state">
           <span>Server</span>
 
           <strong>{serverOnline ? "Online" : "Offline"}</strong>
         </div>
-        {/* VOICE STATUS */}
+
         <div className="state">
           <span>Voice</span>
 
           <strong>{readableState(voiceState)}</strong>
         </div>
-        {/* MAIN CONTROLS */}
+
         <div className="actions">
           <button
             onClick={startJarvis}
@@ -252,7 +250,7 @@ function App() {
             Stop
           </button>
         </div>
-        {/* WAKE WORD */}
+
         <div className="box">
           <label>WAKE WORD</label>
 
@@ -260,7 +258,7 @@ function App() {
             Say <b>"Jarvis"</b> to activate.
           </p>
         </div>
-        {/* LIVE PARTIAL */}
+
         {partialText && (
           <div className="box">
             <label>LISTENING</label>
@@ -268,7 +266,7 @@ function App() {
             <p>{partialText}</p>
           </div>
         )}
-        {/* COMMAND */}
+
         {commandText && (
           <div className="box">
             <label>COMMAND</label>
@@ -276,7 +274,7 @@ function App() {
             <p>{commandText}</p>
           </div>
         )}
-        {/* ANSWER */}
+
         {answerText && (
           <div className="box answer">
             <label>JARVIS</label>
@@ -284,7 +282,7 @@ function App() {
             <p>{answerText}</p>
           </div>
         )}
-        {/* MANUAL CHAT */}
+
         <div className="box">
           <label>TEXT CHAT</label>
 
@@ -294,7 +292,7 @@ function App() {
             onChange={(event) => setManualPrompt(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter") {
-                sendChat();
+                void sendChat();
               }
             }}
             placeholder="Ask JARVIS..."
@@ -317,33 +315,32 @@ function App() {
             }}
           >
             <button
-              onClick={sendChat}
+              onClick={() => void sendChat()}
               disabled={manualLoading || !manualPrompt.trim()}
             >
               {manualLoading ? "Thinking..." : "Send"}
             </button>
           </div>
         </div>
-        {/* SCREEN */}
+
         <div className="actions">
           <button
             className="secondary"
-            onClick={readScreen}
+            onClick={() => void readScreen()}
             disabled={screenshotLoading}
           >
             {screenshotLoading ? "Reading Screen..." : "Read Screen"}
           </button>
         </div>
 
-        {/* ERROR */}
         {errorText && <div className="error">{errorText}</div>}
-        {/* FOOTER */}
+
         <p className="hint">
-          JARVIS server: <b>127.0.0.1:3000</b>
+          JARVIS server: <b>{api.API_BASE_URL}</b>
         </p>
 
         <p className="hint">
-          Vosk listens continuously until JARVIS detects the wake word.
+          Voice uses the browser microphone and server WebSocket.
         </p>
       </section>
     </main>
