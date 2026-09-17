@@ -26,10 +26,7 @@ function App() {
 
   const [screenshotLoading, setScreenshotLoading] = useState(false);
 
-  // ============================================================
   // VOICE EVENTS
-  // ============================================================
-
   const handleVoiceEvent = useCallback((event) => {
     if (!event) return;
 
@@ -60,11 +57,7 @@ function App() {
         break;
     }
   }, []);
-
-  // ============================================================
   // START JARVIS
-  // ============================================================
-
   const startJarvis = useCallback(async () => {
     setErrorText("");
     setVoiceState("connecting");
@@ -90,10 +83,7 @@ function App() {
     }
   }, [handleVoiceEvent]);
 
-  // ============================================================
   // STOP JARVIS
-  // ============================================================
-
   const stopJarvis = useCallback(async () => {
     try {
       await stopRealtimeVoice();
@@ -102,11 +92,7 @@ function App() {
     setVoiceState("stopped");
     setPartialText("");
   }, []);
-
-  // ============================================================
   // INITIAL START
-  // ============================================================
-
   useEffect(() => {
     let mounted = true;
     let timer = null;
@@ -151,10 +137,7 @@ function App() {
     };
   }, [handleVoiceEvent]);
 
-  // ============================================================
   // MANUAL TEXT CHAT
-  // ============================================================
-
   async function sendChat() {
     const prompt = manualPrompt.trim();
 
@@ -180,10 +163,7 @@ function App() {
     }
   }
 
-  // ============================================================
   // SCREENSHOT + OCR
-  // ============================================================
-
   async function readScreen() {
     if (screenshotLoading) {
       return;
@@ -211,10 +191,7 @@ function App() {
     }
   }
 
-  // ============================================================
   // STATUS TEXT
-  // ============================================================
-
   function readableState(state) {
     const states = {
       starting: "Starting...",
@@ -234,18 +211,13 @@ function App() {
   }
 
   const listening = voiceState === "waiting_for_wake_word";
-
   const thinking = voiceState === "thinking";
-
   const speaking = voiceState === "speaking";
 
   return (
     <main className="app">
       <section className="card">
-        {/* ================================================== */}
         {/* HEADER */}
-        {/* ================================================== */}
-
         <div className="top">
           <div>
             <p className="eyebrow">JARVIS</p>
@@ -255,31 +227,19 @@ function App() {
 
           <div className={`dot ${serverOnline ? "online" : ""}`} />
         </div>
-
-        {/* ================================================== */}
         {/* SERVER STATUS */}
-        {/* ================================================== */}
-
         <div className="state">
           <span>Server</span>
 
           <strong>{serverOnline ? "Online" : "Offline"}</strong>
         </div>
-
-        {/* ================================================== */}
         {/* VOICE STATUS */}
-        {/* ================================================== */}
-
         <div className="state">
           <span>Voice</span>
 
           <strong>{readableState(voiceState)}</strong>
         </div>
-
-        {/* ================================================== */}
         {/* MAIN CONTROLS */}
-        {/* ================================================== */}
-
         <div className="actions">
           <button
             onClick={startJarvis}
@@ -292,11 +252,7 @@ function App() {
             Stop
           </button>
         </div>
-
-        {/* ================================================== */}
         {/* WAKE WORD */}
-        {/* ================================================== */}
-
         <div className="box">
           <label>WAKE WORD</label>
 
@@ -304,11 +260,7 @@ function App() {
             Say <b>"Jarvis"</b> to activate.
           </p>
         </div>
-
-        {/* ================================================== */}
         {/* LIVE PARTIAL */}
-        {/* ================================================== */}
-
         {partialText && (
           <div className="box">
             <label>LISTENING</label>
@@ -316,11 +268,7 @@ function App() {
             <p>{partialText}</p>
           </div>
         )}
-
-        {/* ================================================== */}
         {/* COMMAND */}
-        {/* ================================================== */}
-
         {commandText && (
           <div className="box">
             <label>COMMAND</label>
@@ -328,11 +276,7 @@ function App() {
             <p>{commandText}</p>
           </div>
         )}
-
-        {/* ================================================== */}
         {/* ANSWER */}
-        {/* ================================================== */}
-
         {answerText && (
           <div className="box answer">
             <label>JARVIS</label>
@@ -340,11 +284,7 @@ function App() {
             <p>{answerText}</p>
           </div>
         )}
-
-        {/* ================================================== */}
         {/* MANUAL CHAT */}
-        {/* ================================================== */}
-
         <div className="box">
           <label>TEXT CHAT</label>
 
@@ -384,11 +324,7 @@ function App() {
             </button>
           </div>
         </div>
-
-        {/* ================================================== */}
         {/* SCREEN */}
-        {/* ================================================== */}
-
         <div className="actions">
           <button
             className="secondary"
@@ -399,16 +335,9 @@ function App() {
           </button>
         </div>
 
-        {/* ================================================== */}
         {/* ERROR */}
-        {/* ================================================== */}
-
         {errorText && <div className="error">{errorText}</div>}
-
-        {/* ================================================== */}
         {/* FOOTER */}
-        {/* ================================================== */}
-
         <p className="hint">
           JARVIS server: <b>127.0.0.1:3000</b>
         </p>
