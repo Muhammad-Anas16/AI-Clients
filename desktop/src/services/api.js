@@ -1,56 +1,133 @@
-const API_BASE_URL = "http://127.0.0.1:3000";
+import axios from "axios";
 
-// Realtime Vosk WebSocket
-const WS_BASE_URL = "ws://127.0.0.1:3000";
+// SERVER CONFIG
+// Agar AI Server isi PC par chal raha hai:
+export const API_BASE_URL = "http://127.0.0.1:3000";
 
-// BASIC HTTP REQUEST
-async function request(path, options = {}) {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
+export const WS_BASE_URL = API_BASE_URL.replace(/^http/, "ws");
 
-    headers: {
-      ...(options.body instanceof FormData
-        ? {}
-        : {
-            "Content-Type": "application/json",
-          }),
+// Axios client
+const http = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: 120000,
+});
 
-      ...(options.headers || {}),
-    },
-  });
+// ERROR HELPER
+async function getAxiosErrorMessage(error) {
+  const status = error?.response?.status;
+  const data = error?.response?.data;
 
-  const contentType = response.headers.get("content-type") || "";
+  // Kabhi server error blob ki form mein aa sakta hai.
+  if (data instanceof Blob) {
+    try {
+      const text = await data.text();
 
-  if (contentType.includes("application/json")) {
-    const data = await response.json();
+      if (text) {
+        try {
+          const json = JSON.parse(text);
 
-    if (!response.ok || data?.ok === false) {
-      throw new Error(data?.message || `Request failed: ${response.status}`);
+          return json?.message || json?.error || text;
+        } catch {
+          return text;
+        }
+      }
+    } catch {
+      // Ignore blob parsing errors.
     }
+  }
 
+  if (data?.message) {
+    return data.message;
+  }
+
+  if (data?.error) {
+    return data.error;
+  }
+
+  if (typeof data === "string" && data.trim()) {
     return data;
   }
 
-  if (contentType.includes("audio/")) {
-    if (!response.ok) {
-      throw new Error(`Audio request failed: ${response.status}`);
+  if (error?.code === "ECONNABORTED") {
+    return "Server request timed out.";
+  }
+
+  if (!error?.response) {
+    return (
+      "Cannot connect to JARVIS server. " +
+      "Check that the server is running and the IP/port is correct."
+    );
+  }
+
+  return error?.message || `Request failed: ${status || "unknown"}`;
+}
+
+// BASIC AXIOS REQUEST
+async function request(path, options = {}) {
+  const { method = "GET", body, headers = {}, responseType = "json" } = options;
+
+  const isFormData =
+    typeof FormData !== "undefined" && body instanceof FormData;
+
+  try {
+    const response = await http.request({
+      url: path,
+      method,
+
+      // Axios automatically handles objects as JSON.
+      data: body,
+
+      headers: {
+        // IMPORTANT:
+        // FormData ke case mein Content-Type manually set nahi karna.
+        // Browser boundary khud add karega.
+        ...(isFormData
+          ? {}
+          : {
+              "Content-Type": "application/json",
+            }),
+
+        ...(headers || {}),
+      },
+
+      responseType,
+    });
+
+    const contentType = response.headers?.["content-type"] || "";
+
+    // PIPER AUDIO
+    if (responseType === "blob" || contentType.includes("audio/")) {
+      if (!(response.data instanceof Blob)) {
+        throw new Error("Server returned invalid audio data.");
+      }
+
+      return {
+        ok: true,
+        status: response.status,
+        blob: response.data,
+        contentType,
+      };
     }
 
-    return {
-      ok: true,
-      status: response.status,
-      blob: await response.blob(),
-      contentType,
-    };
+    // ========================================================
+    // JSON RESPONSE
+    // ========================================================
+
+    const data = response.data;
+
+    if (data?.ok === false) {
+      throw new Error(data?.message || "Server returned an error.");
+    }
+
+    return data;
+  } catch (error) {
+    // Agar hamne khud Error banaya hai.
+    if (error instanceof Error && !error.response && error.message) {
+      throw error;
+    }
+
+    throw new Error(await getAxiosErrorMessage(error));
   }
-
-  const text = await response.text();
-
-  if (!response.ok) {
-    throw new Error(text || `Request failed: ${response.status}`);
-  }
-
-  return text;
 }
 
 // SERVER
@@ -61,6 +138,7 @@ export async function getServerStatus() {
 export async function checkServer() {
   try {
     await getServerStatus();
+
     return true;
   } catch {
     return false;
@@ -99,9 +177,10 @@ export async function getPiperStatus() {
 export async function warmupPiper(modelId = "urdu") {
   return request("/api/piper/warmup", {
     method: "POST",
-    body: JSON.stringify({
+
+    body: {
       modelId,
-    }),
+    },
   });
 }
 
@@ -112,10 +191,14 @@ export async function synthesizeSpeech(text, modelId = "auto") {
 
   return request("/api/piper/synthesize", {
     method: "POST",
-    body: JSON.stringify({
+
+    body: {
       text: text.trim(),
       modelId,
-    }),
+    },
+
+    // Piper audio/wav response
+    responseType: "blob",
   });
 }
 
@@ -149,6 +232,7 @@ export async function playAudioBlob(blob) {
     return audio;
   } catch (error) {
     URL.revokeObjectURL(url);
+
     throw error;
   }
 }
@@ -173,7 +257,7 @@ export async function chat(prompt, modelId) {
 
   return request("/api/llama/chat", {
     method: "POST",
-    body: JSON.stringify(body),
+    body,
   });
 }
 
@@ -184,10 +268,11 @@ export async function changeLlamaModel(modelId, deletePrevious = true) {
 
   return request("/api/llama/model", {
     method: "POST",
-    body: JSON.stringify({
+
+    body: {
       modelId,
       deletePrevious,
-    }),
+    },
   });
 }
 
@@ -221,12 +306,13 @@ export async function screenshotOcr({
 } = {}) {
   return request("/api/ocr/screenshot", {
     method: "POST",
-    body: JSON.stringify({
+
+    body: {
       askLlama,
       question,
       includeImage,
       language,
-    }),
+    },
   });
 }
 
@@ -256,9 +342,10 @@ export async function analyzeScreenshot(
 ) {
   return request("/api/vision/screenshot", {
     method: "POST",
-    body: JSON.stringify({
+
+    body: {
       prompt,
-    }),
+    },
   });
 }
 
@@ -276,7 +363,6 @@ let realtimeHandlers = {
   onPong: null,
 };
 
-
 export function connectRealtimeVoice(handlers = {}) {
   // Close old socket
   disconnectRealtimeVoice();
@@ -293,12 +379,15 @@ export function connectRealtimeVoice(handlers = {}) {
 
     socket.binaryType = "arraybuffer";
 
+    // ------------------------------------------------------
+    // OPEN
     socket.onopen = () => {
       console.log("[JARVIS] Realtime voice connected");
 
       resolve(socket);
     };
 
+    // MESSAGE
     socket.onmessage = (event) => {
       try {
         const message = JSON.parse(event.data);
@@ -309,6 +398,7 @@ export function connectRealtimeVoice(handlers = {}) {
       }
     };
 
+    // ERROR
     socket.onerror = (event) => {
       console.error("[JARVIS] Realtime voice error:", event);
 
@@ -319,6 +409,7 @@ export function connectRealtimeVoice(handlers = {}) {
       reject(new Error("Realtime voice connection failed."));
     };
 
+    // CLOSE
     socket.onclose = (event) => {
       console.log("[JARVIS] Realtime voice disconnected", event.code);
 
@@ -331,60 +422,69 @@ export function connectRealtimeVoice(handlers = {}) {
   });
 }
 
-// Handle server events
+// REALTIME SERVER MESSAGE HANDLER
 function handleRealtimeMessage(message) {
   switch (message.type) {
     case "voice:connecting":
       if (realtimeHandlers.onConnecting) {
         realtimeHandlers.onConnecting(message);
       }
+
       break;
 
     case "voice:ready":
       if (realtimeHandlers.onReady) {
         realtimeHandlers.onReady(message);
       }
+
       break;
 
     case "voice:wake":
       if (realtimeHandlers.onWake) {
         realtimeHandlers.onWake(message.text || "jarvis");
       }
+
       break;
 
     case "voice:partial":
       if (realtimeHandlers.onPartial) {
         realtimeHandlers.onPartial(message.text || "");
       }
+
       break;
 
     case "voice:command":
       if (realtimeHandlers.onCommand) {
         realtimeHandlers.onCommand(message.text || "");
       }
+
       break;
 
     case "voice:error":
       if (realtimeHandlers.onError) {
         realtimeHandlers.onError(message.message || "Realtime Vosk error.");
       }
+
       break;
 
     case "pong":
       if (realtimeHandlers.onPong) {
         realtimeHandlers.onPong(message);
       }
+
       break;
 
     case "voice:state":
-      // Optional state handling
       console.log("[JARVIS] Voice state:", message.state);
+
       break;
 
     default:
       console.log("[JARVIS] Unknown voice event:", message);
   }
 }
+
+// SEND REALTIME AUDIO
 export function sendRealtimeAudio(audioChunk) {
   if (!realtimeSocket) {
     throw new Error("Realtime voice is not connected.");
@@ -397,7 +497,9 @@ export function sendRealtimeAudio(audioChunk) {
   // Blob
   if (typeof Blob !== "undefined" && audioChunk instanceof Blob) {
     audioChunk.arrayBuffer().then((buffer) => {
-      realtimeSocket.send(buffer);
+      if (realtimeSocket?.readyState === WebSocket.OPEN) {
+        realtimeSocket.send(buffer);
+      }
     });
 
     return;
@@ -485,7 +587,11 @@ export function isRealtimeVoiceConnected() {
   );
 }
 
+// API OBJECT
 const api = {
+  API_BASE_URL,
+  WS_BASE_URL,
+
   // Server
   getServerStatus,
   checkServer,
