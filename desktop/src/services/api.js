@@ -38,3 +38,23 @@ export const AskLlama = async (prompt) => {
     throw error;
   }
 };
+
+// Piper Function
+export const ListenPiper = async (text) => {
+  try {
+    const result = await http.post(
+      "piper/synthesize",
+      {
+        text,
+      },
+      {
+        responseType: "arraybuffer",
+      },
+    );
+
+    return result.data;
+  } catch (error) {
+    console.error("Llama API Error:", error);
+    throw error;
+  }
+};
