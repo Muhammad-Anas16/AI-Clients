@@ -9,7 +9,12 @@ const http = axios.create({
   timeout: 120000,
 });
 
-export const checkStatus = async () => {
+export const checkServerStatus = async () => {
   const result = await http.get("status");
+  return result.data;
+};
+
+export const checkVoskStatus = async () => {
+  const result = await http.get("vosk/status");
   return result.data;
 };

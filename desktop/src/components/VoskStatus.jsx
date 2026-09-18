@@ -1,14 +1,14 @@
 import { useEffect, useState } from "react";
-import { checkServerStatus } from "../services/api";
+import { checkVoskStatus } from "../services/api";
 
-function ServerStatus() {
+const VoskStatus = () => {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
     const testServer = async () => {
       try {
-        const data = await checkServerStatus();
+        const data = await checkVoskStatus();
         setStatus(data);
         setError("");
       } catch (error) {
@@ -22,16 +22,16 @@ function ServerStatus() {
 
   return (
     <div className="flex gap-2">
-      Server Status :{" "}
+      Vosk Status :{" "}
       {status ? (
-        <p>Server is Alive</p>
+        <p>Vosk is Working</p>
       ) : error ? (
         <p>{error}</p>
       ) : (
-        <p>Checking server...</p>
+        <p>Checking Vosk...</p>
       )}
     </div>
   );
-}
+};
 
-export default ServerStatus;
+export default VoskStatus;
