@@ -2,7 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { transcribeAudio } from "../../services/api";
 
 // ============================================================
-// Float32 -> 16-bit PCM
+// VOSK ENDPOINT - sirf UI/debug information ke liye
+// Actual request transcribeAudio() service ke through ja rahi hai
+// ============================================================
+
+const VOSK_ENDPOINT = "http://192.168.1.57:3000/api/vosk/transcribe";
+
+// ============================================================
+// FLOAT32 -> 16 BIT PCM
 // ============================================================
 
 function floatTo16BitPCM(float32Array) {
@@ -21,51 +28,51 @@ function floatTo16BitPCM(float32Array) {
 }
 
 // ============================================================
-// Downsample -> 16kHz
+// RESAMPLE -> 16kHz
+// Works for both downsampling and upsampling
 // ============================================================
 
-function downsampleTo16k(float32Array, inputSampleRate) {
+function resampleTo16k(float32Array, inputSampleRate) {
   const targetSampleRate = 16000;
 
+  // Already 16kHz
   if (inputSampleRate === targetSampleRate) {
     return float32Array;
   }
 
+  const outputLength = Math.max(
+    1,
+    Math.round(
+      float32Array.length * (targetSampleRate / inputSampleRate),
+    ),
+  );
+
+  const result = new Float32Array(outputLength);
+
   const ratio = inputSampleRate / targetSampleRate;
 
-  const newLength = Math.round(float32Array.length / ratio);
+  for (let i = 0; i < outputLength; i += 1) {
+    const position = i * ratio;
 
-  const result = new Float32Array(newLength);
+    const index = Math.floor(position);
 
-  let resultOffset = 0;
-  let inputOffset = 0;
+    const nextIndex = Math.min(index + 1, float32Array.length - 1);
 
-  while (resultOffset < result.length) {
-    const nextInputOffset = Math.round((resultOffset + 1) * ratio);
+    const fraction = position - index;
 
-    let total = 0;
-    let count = 0;
+    const current = float32Array[index] || 0;
 
-    for (
-      let i = inputOffset;
-      i < nextInputOffset && i < float32Array.length;
-      i += 1
-    ) {
-      total += float32Array[i];
-      count += 1;
-    }
+    const next = float32Array[nextIndex] || 0;
 
-    result[resultOffset] = count > 0 ? total / count : 0;
-
-    resultOffset += 1;
-    inputOffset = nextInputOffset;
+    // Linear interpolation
+    result[i] = current + (next - current) * fraction;
   }
 
   return result;
 }
 
 // ============================================================
-// Create WAV
+// CREATE WAV
 // ============================================================
 
 function encodeWav(float32Array, sampleRate = 16000) {
@@ -86,6 +93,7 @@ function encodeWav(float32Array, sampleRate = 16000) {
 
   view.setUint32(4, 36 + pcmData.length, true);
 
+  // WAVE
   writeString(8, "WAVE");
 
   // fmt
@@ -93,7 +101,7 @@ function encodeWav(float32Array, sampleRate = 16000) {
 
   view.setUint32(16, 16, true);
 
-  // PCM
+  // PCM format
   view.setUint16(20, 1, true);
 
   // Mono
@@ -124,7 +132,7 @@ function encodeWav(float32Array, sampleRate = 16000) {
 }
 
 // ============================================================
-// Read transcript from response
+// GET TRANSCRIPT FROM SERVER RESPONSE
 // ============================================================
 
 function getTranscript(response) {
@@ -161,10 +169,79 @@ function getTranscript(response) {
 }
 
 // ============================================================
+// FILE AUDIO -> MONO FLOAT32
+//
+// Uploaded file:
+// MP3 / WAV / M4A / WEBM etc.
+//        ↓
+// Browser decode
+//        ↓
+// Mono Float32
+// ============================================================
+
+async function decodeAudioFileToMono(file) {
+  const AudioContext =
+    window.AudioContext || window.webkitAudioContext;
+
+  if (!AudioContext) {
+    throw new Error("Web Audio API is not supported.");
+  }
+
+  const arrayBuffer = await file.arrayBuffer();
+
+  const audioContext = new AudioContext();
+
+  try {
+    const audioBuffer = await audioContext.decodeAudioData(
+      arrayBuffer,
+    );
+
+    const channelCount = audioBuffer.numberOfChannels;
+
+    const totalSamples = audioBuffer.length;
+
+    // Mono output
+    const mono = new Float32Array(totalSamples);
+
+    // --------------------------------------------------------
+    // Convert multiple channels -> mono
+    // --------------------------------------------------------
+
+    if (channelCount === 1) {
+      const channel = audioBuffer.getChannelData(0);
+
+      mono.set(channel);
+    } else {
+      for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
+        const channelData = audioBuffer.getChannelData(channelIndex);
+
+        for (let i = 0; i < totalSamples; i += 1) {
+          mono[i] += channelData[i] / channelCount;
+        }
+      }
+    }
+
+    return {
+      samples: mono,
+      sampleRate: audioBuffer.sampleRate,
+      duration: audioBuffer.duration,
+    };
+  } finally {
+    if (audioContext.state !== "closed") {
+      await audioContext.close();
+    }
+  }
+}
+
+// ============================================================
 // COMPONENT
 // ============================================================
 
 export default function VoskRecorder() {
+  // ==========================================================
+  // UI STATE
+  // ==========================================================
+
   const [recording, setRecording] = useState(false);
 
   const [processing, setProcessing] = useState(false);
@@ -175,29 +252,62 @@ export default function VoskRecorder() {
 
   const [error, setError] = useState("");
 
-  // Microphone
+  // Selected recorded audio file
+  const [selectedFile, setSelectedFile] = useState(null);
+
+  // ==========================================================
+  // MICROPHONE REFERENCES
+  // ==========================================================
+
   const rawStreamRef = useRef(null);
 
-  // Audio context
+  // ==========================================================
+  // AUDIO CONTEXT
+  // ==========================================================
+
   const audioContextRef = useRef(null);
 
-  // Audio source
+  // ==========================================================
+  // MICROPHONE SOURCE
+  // ==========================================================
+
   const sourceRef = useRef(null);
 
-  // Processor
+  // ==========================================================
+  // PROCESSOR
+  // ==========================================================
+
   const processorRef = useRef(null);
 
-  // Mute output
+  // ==========================================================
+  // MUTE OUTPUT
+  // ==========================================================
+
   const muteGainRef = useRef(null);
 
-  // Audio chunks
+  // ==========================================================
+  // RECORDED AUDIO CHUNKS
+  // ==========================================================
+
   const chunksRef = useRef([]);
 
-  // Actual browser sample rate
+  // ==========================================================
+  // ACTUAL BROWSER SAMPLE RATE
+  // ==========================================================
+
   const sampleRateRef = useRef(48000);
 
-  // Internal recording state
+  // ==========================================================
+  // INTERNAL RECORDING STATE
+  // ==========================================================
+
   const recordingRef = useRef(false);
+
+  // ==========================================================
+  // FILE INPUT REF
+  // ==========================================================
+
+  const fileInputRef = useRef(null);
 
   // ==========================================================
   // CLEANUP
@@ -205,6 +315,10 @@ export default function VoskRecorder() {
 
   const cleanup = async () => {
     recordingRef.current = false;
+
+    // --------------------------------------------------------
+    // PROCESSOR
+    // --------------------------------------------------------
 
     if (processorRef.current) {
       processorRef.current.onaudioprocess = null;
@@ -214,17 +328,29 @@ export default function VoskRecorder() {
       processorRef.current = null;
     }
 
+    // --------------------------------------------------------
+    // SOURCE
+    // --------------------------------------------------------
+
     if (sourceRef.current) {
       sourceRef.current.disconnect();
 
       sourceRef.current = null;
     }
 
+    // --------------------------------------------------------
+    // MUTE GAIN
+    // --------------------------------------------------------
+
     if (muteGainRef.current) {
       muteGainRef.current.disconnect();
 
       muteGainRef.current = null;
     }
+
+    // --------------------------------------------------------
+    // MICROPHONE STREAM
+    // --------------------------------------------------------
 
     if (rawStreamRef.current) {
       rawStreamRef.current.getTracks().forEach((track) => {
@@ -233,6 +359,10 @@ export default function VoskRecorder() {
 
       rawStreamRef.current = null;
     }
+
+    // --------------------------------------------------------
+    // AUDIO CONTEXT
+    // --------------------------------------------------------
 
     if (audioContextRef.current) {
       const context = audioContextRef.current;
@@ -246,7 +376,7 @@ export default function VoskRecorder() {
   };
 
   // ==========================================================
-  // CLEANUP WHEN COMPONENT CLOSES
+  // CLEANUP WHEN COMPONENT UNMOUNTS
   // ==========================================================
 
   useEffect(() => {
@@ -258,45 +388,78 @@ export default function VoskRecorder() {
   }, []);
 
   // ==========================================================
-  // START RECORDING
+  // START MICROPHONE RECORDING
+  //
+  // FLOW:
+  //
+  // Microphone
+  //    ↓
+  // High Pass
+  //    ↓
+  // 50Hz Notch
+  //    ↓
+  // 100Hz Notch
+  //    ↓
+  // Low Pass
+  //    ↓
+  // Compressor
+  //    ↓
+  // Float32 chunks
   // ==========================================================
 
   const startRecording = async () => {
     try {
+      // Reset UI
       setError("");
+
       setTranscript("");
+
+      setSelectedFile(null);
 
       setStatus("Requesting microphone...");
 
+      // ------------------------------------------------------
+      // CHECK SECURE CONTEXT
+      // ------------------------------------------------------
+
       if (!window.isSecureContext) {
-        throw new Error("Microphone requires a secure context.");
+        throw new Error(
+          "Microphone requires HTTPS or localhost.",
+        );
       }
+
+      // ------------------------------------------------------
+      // CHECK MICROPHONE API
+      // ------------------------------------------------------
 
       if (!navigator.mediaDevices?.getUserMedia) {
-        throw new Error("Microphone API is not available.");
+        throw new Error(
+          "Microphone API is not available.",
+        );
       }
 
       // ------------------------------------------------------
-      // GET MICROPHONE
+      // REQUEST MICROPHONE
       // ------------------------------------------------------
 
-      const rawStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
+      const rawStream =
+        await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
 
-          echoCancellation: true,
+            echoCancellation: true,
 
-          noiseSuppression: true,
+            noiseSuppression: true,
 
-          autoGainControl: true,
+            autoGainControl: true,
 
-          sampleRate: 16000,
+            sampleRate: 16000,
 
-          sampleSize: 16,
-        },
+            sampleSize: 16,
+          },
 
-        video: false,
-      });
+          video: false,
+        });
 
       rawStreamRef.current = rawStream;
 
@@ -304,10 +467,13 @@ export default function VoskRecorder() {
       // AUDIO CONTEXT
       // ------------------------------------------------------
 
-      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      const AudioContext =
+        window.AudioContext || window.webkitAudioContext;
 
       if (!AudioContext) {
-        throw new Error("Web Audio API is not supported.");
+        throw new Error(
+          "Web Audio API is not supported.",
+        );
       }
 
       const audioContext = new AudioContext();
@@ -324,7 +490,10 @@ export default function VoskRecorder() {
       // MICROPHONE SOURCE
       // ------------------------------------------------------
 
-      const source = audioContext.createMediaStreamSource(rawStream);
+      const source =
+        audioContext.createMediaStreamSource(
+          rawStream,
+        );
 
       sourceRef.current = source;
 
@@ -333,7 +502,8 @@ export default function VoskRecorder() {
       // Removes low frequency rumble
       // ------------------------------------------------------
 
-      const highPass = audioContext.createBiquadFilter();
+      const highPass =
+        audioContext.createBiquadFilter();
 
       highPass.type = "highpass";
 
@@ -342,10 +512,12 @@ export default function VoskRecorder() {
       highPass.Q.value = 0.7;
 
       // ------------------------------------------------------
-      // 50Hz HUM
+      // 50Hz NOTCH
+      // Removes electrical hum
       // ------------------------------------------------------
 
-      const notch50 = audioContext.createBiquadFilter();
+      const notch50 =
+        audioContext.createBiquadFilter();
 
       notch50.type = "notch";
 
@@ -354,10 +526,12 @@ export default function VoskRecorder() {
       notch50.Q.value = 10;
 
       // ------------------------------------------------------
-      // 100Hz HUM HARMONIC
+      // 100Hz NOTCH
+      // Removes harmonic hum
       // ------------------------------------------------------
 
-      const notch100 = audioContext.createBiquadFilter();
+      const notch100 =
+        audioContext.createBiquadFilter();
 
       notch100.type = "notch";
 
@@ -367,10 +541,11 @@ export default function VoskRecorder() {
 
       // ------------------------------------------------------
       // LOW PASS
-      // Keeps speech range
+      // Keeps useful speech range
       // ------------------------------------------------------
 
-      const lowPass = audioContext.createBiquadFilter();
+      const lowPass =
+        audioContext.createBiquadFilter();
 
       lowPass.type = "lowpass";
 
@@ -380,10 +555,11 @@ export default function VoskRecorder() {
 
       // ------------------------------------------------------
       // COMPRESSOR
-      // Makes voice level stable
+      // Makes voice level more stable
       // ------------------------------------------------------
 
-      const compressor = audioContext.createDynamicsCompressor();
+      const compressor =
+        audioContext.createDynamicsCompressor();
 
       compressor.threshold.value = -24;
 
@@ -396,19 +572,28 @@ export default function VoskRecorder() {
       compressor.release.value = 0.15;
 
       // ------------------------------------------------------
-      // AUDIO PROCESSOR
+      // SCRIPT PROCESSOR
+      //
+      // Used here to capture processed audio samples
       // ------------------------------------------------------
 
-      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      const processor =
+        audioContext.createScriptProcessor(
+          4096,
+          1,
+          1,
+        );
 
       processorRef.current = processor;
 
       // ------------------------------------------------------
-      // MUTE
+      // MUTE OUTPUT
+      //
       // Prevent microphone feedback
       // ------------------------------------------------------
 
-      const muteGain = audioContext.createGain();
+      const muteGain =
+        audioContext.createGain();
 
       muteGain.gain.value = 0;
 
@@ -429,13 +614,34 @@ export default function VoskRecorder() {
           return;
         }
 
-        const input = event.inputBuffer.getChannelData(0);
+        const input =
+          event.inputBuffer.getChannelData(0);
 
-        chunksRef.current.push(new Float32Array(input));
+        chunksRef.current.push(
+          new Float32Array(input),
+        );
       };
 
       // ------------------------------------------------------
       // AUDIO PIPELINE
+      //
+      // Microphone
+      //     ↓
+      // High Pass
+      //     ↓
+      // 50Hz Notch
+      //     ↓
+      // 100Hz Notch
+      //     ↓
+      // Low Pass
+      //     ↓
+      // Compressor
+      //     ↓
+      // Processor
+      //     ↓
+      // Mute
+      //     ↓
+      // Speaker (volume 0)
       // ------------------------------------------------------
 
       source.connect(highPass);
@@ -452,7 +658,9 @@ export default function VoskRecorder() {
 
       processor.connect(muteGain);
 
-      muteGain.connect(audioContext.destination);
+      muteGain.connect(
+        audioContext.destination,
+      );
 
       // ------------------------------------------------------
       // START
@@ -462,9 +670,14 @@ export default function VoskRecorder() {
 
       setRecording(true);
 
-      setStatus("Recording clean audio... Speak now.");
+      setStatus(
+        "Recording clean audio... Speak now.",
+      );
     } catch (error) {
-      console.error("Microphone error:", error);
+      console.error(
+        "Microphone error:",
+        error,
+      );
 
       await cleanup();
 
@@ -472,12 +685,31 @@ export default function VoskRecorder() {
 
       setStatus("Failed");
 
-      setError(error?.message || "Could not start microphone.");
+      setError(
+        error?.message ||
+          "Could not start microphone.",
+      );
     }
   };
 
   // ==========================================================
-  // STOP + SEND TO VOSK
+  // STOP MICROPHONE + SEND TO VOSK
+  //
+  // FLOW:
+  //
+  // Float32 chunks
+  //       ↓
+  // Combine
+  //       ↓
+  // Resample 16kHz
+  //       ↓
+  // WAV
+  //       ↓
+  // transcribeAudio()
+  //       ↓
+  // Vosk Server
+  //       ↓
+  // Transcript
   // ==========================================================
 
   const stopAndTranscribe = async () => {
@@ -492,19 +724,26 @@ export default function VoskRecorder() {
 
       setProcessing(true);
 
-      setStatus("Preparing audio...");
+      setStatus(
+        "Preparing microphone audio...",
+      );
 
-      // Stop collecting
+      // ------------------------------------------------------
+      // STOP COLLECTING AUDIO
+      // ------------------------------------------------------
+
       recordingRef.current = false;
 
       const chunks = chunksRef.current;
 
       if (!chunks.length) {
-        throw new Error("No audio was captured.");
+        throw new Error(
+          "No audio was captured.",
+        );
       }
 
       // ------------------------------------------------------
-      // CALCULATE TOTAL AUDIO LENGTH
+      // TOTAL AUDIO LENGTH
       // ------------------------------------------------------
 
       let totalLength = 0;
@@ -514,15 +753,19 @@ export default function VoskRecorder() {
       }
 
       // ------------------------------------------------------
-      // COMBINE ALL AUDIO
+      // COMBINE CHUNKS
       // ------------------------------------------------------
 
-      const combined = new Float32Array(totalLength);
+      const combined =
+        new Float32Array(totalLength);
 
       let offset = 0;
 
       for (const chunk of chunks) {
-        combined.set(chunk, offset);
+        combined.set(
+          chunk,
+          offset,
+        );
 
         offset += chunk.length;
       }
@@ -531,17 +774,28 @@ export default function VoskRecorder() {
       // CONVERT TO 16kHz
       // ------------------------------------------------------
 
-      const originalSampleRate = sampleRateRef.current;
+      const originalSampleRate =
+        sampleRateRef.current;
 
-      const mono16k = downsampleTo16k(combined, originalSampleRate);
+      const mono16k = resampleTo16k(
+        combined,
+        originalSampleRate,
+      );
 
       // ------------------------------------------------------
       // CREATE WAV
       // ------------------------------------------------------
 
-      const wavBlob = encodeWav(mono16k, 16000);
+      const wavBlob = encodeWav(
+        mono16k,
+        16000,
+      );
 
-      console.log("WAV size:", wavBlob.size, "bytes");
+      console.log(
+        "Microphone WAV size:",
+        wavBlob.size,
+        "bytes",
+      );
 
       // ------------------------------------------------------
       // CLOSE MICROPHONE
@@ -553,17 +807,26 @@ export default function VoskRecorder() {
       // SEND TO SERVER
       // ------------------------------------------------------
 
-      setStatus("Sending audio to Vosk...");
+      setStatus(
+        "Sending microphone audio to Vosk...",
+      );
 
-      const response = await transcribeAudio(wavBlob);
+      const response =
+        await transcribeAudio(
+          wavBlob,
+        );
 
-      console.log("Vosk response:", response);
+      console.log(
+        "Vosk response:",
+        response,
+      );
 
       // ------------------------------------------------------
-      // GET TEXT
+      // GET TRANSCRIPT
       // ------------------------------------------------------
 
-      const text = getTranscript(response);
+      const text =
+        getTranscript(response);
 
       if (!text) {
         throw new Error(
@@ -573,9 +836,14 @@ export default function VoskRecorder() {
 
       setTranscript(text);
 
-      setStatus("Transcription complete.");
+      setStatus(
+        "Microphone transcription complete.",
+      );
     } catch (error) {
-      console.error("Transcription error:", error);
+      console.error(
+        "Microphone transcription error:",
+        error,
+      );
 
       await cleanup();
 
@@ -593,7 +861,230 @@ export default function VoskRecorder() {
   };
 
   // ==========================================================
-  // CANCEL
+  // FILE SELECT
+  //
+  // User can select:
+  // WAV
+  // MP3
+  // WEBM
+  // M4A
+  // OGG
+  // etc.
+  // ==========================================================
+
+  const handleFileChange = (event) => {
+    try {
+      setError("");
+
+      setTranscript("");
+
+      const file =
+        event.target.files?.[0];
+
+      if (!file) {
+        setSelectedFile(null);
+
+        return;
+      }
+
+      setSelectedFile(file);
+
+      setStatus(
+        "Recorded audio selected. Ready to upload.",
+      );
+    } catch (error) {
+      console.error(
+        "File selection error:",
+        error,
+      );
+
+      setError(
+        error?.message ||
+          "Could not select audio file.",
+      );
+    }
+  };
+
+  // ==========================================================
+  // UPLOAD RECORDED AUDIO + SEND TO VOSK
+  //
+  // FLOW:
+  //
+  // Recorded file
+  // (.mp3/.wav/.m4a/.webm...)
+  //          ↓
+  // Browser Audio Decoder
+  //          ↓
+  // Mono Float32
+  //          ↓
+  // 16kHz
+  //          ↓
+  // WAV
+  //          ↓
+  // Vosk Server
+  //          ↓
+  // Transcript
+  // ==========================================================
+
+  const uploadAndTranscribe = async () => {
+    if (!selectedFile) {
+      setError(
+        "Please select a recorded audio file first.",
+      );
+
+      return;
+    }
+
+    try {
+      setError("");
+
+      setTranscript("");
+
+      setProcessing(true);
+
+      setStatus(
+        "Reading recorded audio...",
+      );
+
+      console.log(
+        "Selected file:",
+        selectedFile.name,
+      );
+
+      console.log(
+        "File type:",
+        selectedFile.type,
+      );
+
+      console.log(
+        "File size:",
+        selectedFile.size,
+        "bytes",
+      );
+
+      // ------------------------------------------------------
+      // DECODE AUDIO FILE
+      // ------------------------------------------------------
+
+      const decoded =
+        await decodeAudioFileToMono(
+          selectedFile,
+        );
+
+      console.log(
+        "Original sample rate:",
+        decoded.sampleRate,
+      );
+
+      console.log(
+        "Audio duration:",
+        decoded.duration,
+        "seconds",
+      );
+
+      // ------------------------------------------------------
+      // CONVERT TO 16kHz
+      // ------------------------------------------------------
+
+      setStatus(
+        "Converting recorded audio to 16kHz mono...",
+      );
+
+      const mono16k =
+        resampleTo16k(
+          decoded.samples,
+          decoded.sampleRate,
+        );
+
+      // ------------------------------------------------------
+      // CREATE STANDARD WAV
+      // ------------------------------------------------------
+
+      const wavBlob =
+        encodeWav(
+          mono16k,
+          16000,
+        );
+
+      console.log(
+        "Uploaded audio converted WAV size:",
+        wavBlob.size,
+        "bytes",
+      );
+
+      // ------------------------------------------------------
+      // SEND TO SERVER
+      // ------------------------------------------------------
+
+      setStatus(
+        "Sending recorded audio to Vosk...",
+      );
+
+      const response =
+        await transcribeAudio(
+          wavBlob,
+        );
+
+      console.log(
+        "Vosk response:",
+        response,
+      );
+
+      // ------------------------------------------------------
+      // READ TRANSCRIPT
+      // ------------------------------------------------------
+
+      const text =
+        getTranscript(response);
+
+      if (!text) {
+        throw new Error(
+          "Vosk response received, but transcript text was not found.",
+        );
+      }
+
+      setTranscript(text);
+
+      setStatus(
+        "Recorded audio transcription complete.",
+      );
+    } catch (error) {
+      console.error(
+        "Uploaded audio transcription error:",
+        error,
+      );
+
+      setStatus("Failed");
+
+      setError(
+        error?.response?.data?.message ||
+          error?.response?.data?.error ||
+          error?.message ||
+          "Could not transcribe uploaded audio.",
+      );
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  // ==========================================================
+  // REMOVE SELECTED FILE
+  // ==========================================================
+
+  const clearSelectedFile = () => {
+    setSelectedFile(null);
+
+    setError("");
+
+    setStatus("Ready");
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
+  // ==========================================================
+  // CANCEL MICROPHONE
   // ==========================================================
 
   const cancelRecording = async () => {
@@ -613,86 +1104,280 @@ export default function VoskRecorder() {
   // ==========================================================
 
   return (
-    <div className="flex items-center justify-center bg-gray-100 p-6">
-      <div className="w-full max-w-2xl rounded-2xl bg-white p-6 shadow-lg">
-        <h1 className="text-2xl font-bold text-gray-900">Voice to Vosk</h1>
+    <div className="min-h-screen bg-gray-100 p-6">
+      <div className="mx-auto w-full max-w-3xl rounded-2xl bg-white p-6 shadow-lg">
+        {/* ================================================== */}
+        {/* HEADER */}
+        {/* ================================================== */}
 
-        <p className="mt-2 text-gray-600">
-          Microphone → Clean Audio → 16kHz WAV → Vosk Server
-        </p>
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">
+            Voice to Vosk
+          </h1>
 
-        {/* BUTTONS */}
+          <p className="mt-2 text-gray-600">
+            Live microphone ya recorded audio file —
+            dono ko Vosk server par bhej sakte ho.
+          </p>
+        </div>
 
-        <div className="mt-6 flex gap-3">
-          {!recording ? (
-            <button
-              onClick={startRecording}
-              disabled={processing}
-              className="flex-1 rounded-xl bg-black px-5 py-3 font-medium text-white hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {processing ? "Processing..." : "Start Microphone"}
-            </button>
-          ) : (
-            <button
-              onClick={stopAndTranscribe}
-              className="flex-1 rounded-xl bg-black px-5 py-3 font-medium text-white hover:bg-gray-800"
-            >
-              Stop & Transcribe
-            </button>
-          )}
+        {/* ================================================== */}
+        {/* AUDIO FLOW */}
+        {/* ================================================== */}
 
-          {recording && (
-            <button
-              onClick={cancelRecording}
-              className="rounded-xl border border-gray-300 px-5 py-3 font-medium text-gray-800 hover:bg-gray-100"
-            >
-              Cancel
-            </button>
+        <div className="mt-6 rounded-xl border border-gray-200 bg-gray-50 p-4">
+          <div className="font-semibold text-gray-900">
+            Audio Processing Flow
+          </div>
+
+          <div className="mt-3 text-sm leading-7 text-gray-600">
+            <div>
+              🎤 <strong>Microphone</strong> → Clean
+              Audio → 16kHz WAV → Vosk Server
+            </div>
+
+            <div>
+              📁 <strong>Recorded File</strong> → Decode
+              Audio → Mono → 16kHz WAV → Vosk Server
+            </div>
+
+            <div>
+              🧠 <strong>Vosk Server</strong> → Text
+              Transcript → React UI
+            </div>
+          </div>
+        </div>
+
+        {/* ================================================== */}
+        {/* SECTION 1 - LIVE MICROPHONE */}
+        {/* ================================================== */}
+
+        <div className="mt-6 rounded-2xl border border-gray-200 p-5">
+          <div>
+            <h2 className="text-lg font-bold text-gray-900">
+              1. Live Microphone
+            </h2>
+
+            <p className="mt-1 text-sm text-gray-500">
+              Direct microphone se bol kar server ko audio
+              bhejo.
+            </p>
+          </div>
+
+          {/* MICROPHONE BUTTONS */}
+
+          <div className="mt-4 flex gap-3">
+            {!recording ? (
+              <button
+                onClick={startRecording}
+                disabled={processing}
+                className="flex-1 rounded-xl bg-black px-5 py-3 font-medium text-white transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {processing
+                  ? "Processing..."
+                  : "🎤 Start Microphone"}
+              </button>
+            ) : (
+              <button
+                onClick={
+                  stopAndTranscribe
+                }
+                className="flex-1 rounded-xl bg-black px-5 py-3 font-medium text-white transition hover:bg-gray-800"
+              >
+                ⏹ Stop & Transcribe
+              </button>
+            )}
+
+            {recording && (
+              <button
+                onClick={
+                  cancelRecording
+                }
+                className="rounded-xl border border-gray-300 px-5 py-3 font-medium text-gray-800 transition hover:bg-gray-100"
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* ================================================== */}
+        {/* SECTION 2 - RECORDED AUDIO UPLOAD */}
+        {/* ================================================== */}
+
+        <div className="mt-6 rounded-2xl border border-gray-200 p-5">
+          <div>
+            <h2 className="text-lg font-bold text-gray-900">
+              2. Upload Recorded Voice
+            </h2>
+
+            <p className="mt-1 text-sm text-gray-500">
+              Pehle se recorded voice select karo aur
+              server ko bhejo.
+            </p>
+          </div>
+
+          {/* FILE INPUT */}
+
+          <div className="mt-4">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="audio/*,.wav,.mp3,.m4a,.webm,.ogg"
+              onChange={
+                handleFileChange
+              }
+              disabled={
+                processing ||
+                recording
+              }
+              className="block w-full cursor-pointer rounded-xl border border-gray-300 bg-white p-3 text-sm text-gray-700 file:mr-4 file:rounded-lg file:border-0 file:bg-gray-100 file:px-4 file:py-2 file:font-medium hover:file:bg-gray-200 disabled:cursor-not-allowed disabled:opacity-50"
+            />
+          </div>
+
+          {/* SELECTED FILE */}
+
+          {selectedFile && (
+            <div className="mt-4 rounded-xl bg-gray-50 p-4">
+              <div className="text-sm font-semibold text-gray-900">
+                Selected Audio
+              </div>
+
+              <div className="mt-2 break-all text-sm text-gray-600">
+                {selectedFile.name}
+              </div>
+
+              <div className="mt-1 text-xs text-gray-500">
+                Type:{" "}
+                {selectedFile.type ||
+                  "Unknown"}
+              </div>
+
+              <div className="mt-1 text-xs text-gray-500">
+                Size:{" "}
+                {(
+                  selectedFile.size /
+                  1024 /
+                  1024
+                ).toFixed(2)}{" "}
+                MB
+              </div>
+
+              {/* FILE ACTIONS */}
+
+              <div className="mt-4 flex gap-3">
+                <button
+                  onClick={
+                    uploadAndTranscribe
+                  }
+                  disabled={
+                    processing ||
+                    recording ||
+                    !selectedFile
+                  }
+                  className="flex-1 rounded-xl bg-black px-5 py-3 font-medium text-white transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {processing
+                    ? "Processing..."
+                    : "📤 Upload & Transcribe"}
+                </button>
+
+                <button
+                  onClick={
+                    clearSelectedFile
+                  }
+                  disabled={
+                    processing
+                  }
+                  className="rounded-xl border border-gray-300 px-5 py-3 font-medium text-gray-800 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Remove
+                </button>
+              </div>
+            </div>
           )}
         </div>
 
+        {/* ================================================== */}
         {/* STATUS */}
+        {/* ================================================== */}
 
-        <div className="mt-5 rounded-xl bg-gray-50 p-4">
-          <div className="font-semibold text-gray-900">Status</div>
+        <div className="mt-6 rounded-xl bg-gray-50 p-4">
+          <div className="font-semibold text-gray-900">
+            Current Status
+          </div>
 
-          <div className="mt-1 text-gray-700">{status}</div>
+          <div className="mt-1 text-gray-700">
+            {status}
+          </div>
         </div>
 
+        {/* ================================================== */}
         {/* TRANSCRIPT */}
+        {/* ================================================== */}
 
         {transcript && (
-          <div className="mt-5 rounded-xl border border-gray-200 p-4">
-            <div className="font-semibold text-gray-900">Vosk Transcript</div>
+          <div className="mt-6 rounded-xl border border-gray-200 p-5">
+            <div className="font-semibold text-gray-900">
+              Vosk Transcript
+            </div>
 
-            <p className="mt-2 text-lg text-gray-700">{transcript}</p>
+            <p className="mt-3 text-lg leading-relaxed text-gray-700">
+              {transcript}
+            </p>
           </div>
         )}
 
+        {/* ================================================== */}
         {/* ERROR */}
+        {/* ================================================== */}
 
         {error && (
-          <div className="mt-5 rounded-xl bg-red-50 p-4 text-red-700">
-            {error}
+          <div className="mt-6 rounded-xl bg-red-50 p-4 text-red-700">
+            <div className="font-semibold">
+              Error
+            </div>
+
+            <div className="mt-1">
+              {error}
+            </div>
           </div>
         )}
 
-        {/* DEBUG */}
+        {/* ================================================== */}
+        {/* DEBUG INFORMATION */}
+        {/* ================================================== */}
 
-        <div className="mt-6 space-y-1 border-t border-gray-200 pt-4 text-sm text-gray-500">
-          <div>Secure Context: {window.isSecureContext ? "YES" : "NO"}</div>
+        <div className="mt-6 space-y-2 border-t border-gray-200 pt-5 text-sm text-gray-500">
+          <div>
+            <strong>Secure Context:</strong>{" "}
+            {window.isSecureContext
+              ? "YES"
+              : "NO"}
+          </div>
 
           <div>
-            Microphone API:{" "}
-            {navigator.mediaDevices?.getUserMedia
+            <strong>Microphone API:</strong>{" "}
+            {navigator.mediaDevices
+              ?.getUserMedia
               ? "AVAILABLE"
               : "NOT AVAILABLE"}
           </div>
 
           <div>
-            Vosk Endpoint:
+            <strong>File Upload:</strong>{" "}
+            SUPPORTED
+          </div>
+
+          <div>
+            <strong>Vosk Endpoint:</strong>
             <br />
-            http://192.168.1.57:3000/api/vosk/transcribe
+            {VOSK_ENDPOINT}
+          </div>
+
+          <div>
+            <strong>Output Format:</strong>{" "}
+            16kHz / Mono / 16-bit PCM WAV
           </div>
         </div>
       </div>
