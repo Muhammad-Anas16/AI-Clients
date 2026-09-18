@@ -24,7 +24,7 @@ function ServerStatus() {
     <div className="flex gap-2">
       Server Status :{" "}
       {status ? (
-        <p>Server is Alive</p>
+        <p>Server Connected</p>
       ) : error ? (
         <p>{error}</p>
       ) : (

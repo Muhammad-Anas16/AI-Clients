@@ -9,6 +9,7 @@ const http = axios.create({
   timeout: 120000,
 });
 
+// Status
 export const checkServerStatus = async () => {
   const result = await http.get("status");
   return result.data;
@@ -17,4 +18,23 @@ export const checkServerStatus = async () => {
 export const checkVoskStatus = async () => {
   const result = await http.get("vosk/status");
   return result.data;
+};
+
+export const checkPiperStatus = async () => {
+  const result = await http.get("piper/status");
+  return result.data;
+};
+
+// Llama Function
+export const llama = async (prompt) => {
+  try {
+    const result = await http.post("llama/chat", {
+      prompt: prompt,
+    });
+
+    return result.data;
+  } catch (error) {
+    console.error("Llama API Error:", error);
+    throw error;
+  }
 };
