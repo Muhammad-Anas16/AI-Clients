@@ -4,6 +4,7 @@ import VoskStatus from "./components/status/VoskStatus";
 import PiperStatus from "./components/status/PiperStatus";
 import TalkToLlama from "./components/llama/TalkToLlama";
 import PiperListening from "./components/piper/listening";
+import VoskRecorder from "./components/audio/VoskRecorder";
 
 function App() {
   return (
@@ -11,6 +12,8 @@ function App() {
       <ServerStatus />
       <VoskStatus />
       <PiperStatus />
+      {/* VOSK Transcriptions */}
+      <VoskRecorder />
       {/* Llama */}
       <TalkToLlama />
       {/* Piper */}
