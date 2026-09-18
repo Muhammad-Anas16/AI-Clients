@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { checkVoskStatus } from "../services/api";
+import { checkVoskStatus } from "../../services/api";
 
 const VoskStatus = () => {
   const [status, setStatus] = useState(null);

@@ -26,7 +26,7 @@ export const checkPiperStatus = async () => {
 };
 
 // Llama Function
-export const llama = async (prompt) => {
+export const AskLlama = async (prompt) => {
   try {
     const result = await http.post("llama/chat", {
       prompt: prompt,

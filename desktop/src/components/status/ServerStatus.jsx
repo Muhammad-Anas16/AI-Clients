@@ -1,14 +1,14 @@
 import { useEffect, useState } from "react";
-import { checkPiperStatus } from "../services/api";
+import { checkServerStatus } from "../../services/api";
 
-const PiperStatus = () => {
+function ServerStatus() {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
     const testServer = async () => {
       try {
-        const data = await checkPiperStatus();
+        const data = await checkServerStatus();
         setStatus(data);
         setError("");
       } catch (error) {
@@ -22,16 +22,16 @@ const PiperStatus = () => {
 
   return (
     <div className="flex gap-2">
-      Piper Status :{" "}
+      Server Status :{" "}
       {status ? (
-        <p>Piper Connected</p>
+        <p>Server Connected</p>
       ) : error ? (
         <p>{error}</p>
       ) : (
-        <p>Checking Piper...</p>
+        <p>Checking server...</p>
       )}
     </div>
   );
-};
+}
 
-export default PiperStatus;
+export default ServerStatus;

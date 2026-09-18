@@ -1,19 +1,20 @@
 import "./App.css";
-import ServerStatus from "./components/ServerStatus";
-import VoskStatus from "./components/VoskStatus";
-import PiperStatus from "./components/PiperStatus";
-import WebRTCAudioTest from "./components/audio/WebRTCAudioTest";
+import ServerStatus from "./components/status/ServerStatus";
+import VoskStatus from "./components/status/VoskStatus";
+import PiperStatus from "./components/status/PiperStatus";
+import TalkToLlama from "./components/llama/TalkToLlama";
+import PiperListening from "./components/piper/listening";
 
 function App() {
   return (
-    <main className="bg-amber-500">
+    <main className="">
       <ServerStatus />
       <VoskStatus />
       <PiperStatus />
-
-      <h1>Hello world</h1>
-
-      <WebRTCAudioTest />
+      {/* Llama */}
+      <TalkToLlama />
+      {/* Piper */}
+      <PiperListening />
     </main>
   );
 }
