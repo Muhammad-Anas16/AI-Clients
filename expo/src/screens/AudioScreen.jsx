@@ -11,9 +11,11 @@ export default function AudioScreen() {
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
       >
-        <Text style={styles.heading}>Audio</Text>
+        <Text style={styles.heading}>Voice Assistant</Text>
 
-        <Text style={styles.subtitle}>Record your voice and play it back.</Text>
+        <Text style={styles.subtitle}>
+          Your microphone starts listening automatically.
+        </Text>
 
         <AudioRecorder />
       </ScrollView>
