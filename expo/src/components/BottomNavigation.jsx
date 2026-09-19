@@ -1,5 +1,6 @@
 import React from "react";
 import { View, Text, Pressable, StyleSheet } from "react-native";
+
 import { usePathname, router } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -28,6 +29,15 @@ export default function BottomNavigation() {
       >
         <Text style={[styles.text, pathname === "/" && styles.activeText]}>
           Home
+        </Text>
+      </Pressable>
+
+      <Pressable
+        style={[styles.item, pathname === "/audio" && styles.activeItem]}
+        onPress={() => goTo("/audio")}
+      >
+        <Text style={[styles.text, pathname === "/audio" && styles.activeText]}>
+          Audio
         </Text>
       </Pressable>
 
@@ -68,7 +78,7 @@ const styles = StyleSheet.create({
   },
 
   text: {
-    fontSize: 16,
+    fontSize: 15,
     color: "#555",
   },
 
