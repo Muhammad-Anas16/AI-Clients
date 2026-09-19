@@ -8,6 +8,7 @@ import {
   checkServerStatus,
   checkVoskStatus,
 } from "@/axios/status";
+import { getHttp } from "@/axios/status";
 
 export default function Index() {
   useEffect(() => {
@@ -15,9 +16,12 @@ export default function Index() {
       const res = await checkServerStatus();
       const vosk = await checkVoskStatus();
       const piper = await checkPiperStatus();
+      // const check = await getHttp();
+      await getHttp();
       console.log(res?.success ? "server is Connected" : "connect to server");
       console.log(vosk?.success ? "vosk is Connected" : "connect to vosk");
       console.log(piper?.success ? "piper is Connected" : "connect to piper");
+      // console.log(check ? check : "Not Found");
     };
 
     getRes();

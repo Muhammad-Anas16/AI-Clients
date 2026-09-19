@@ -1,439 +1,187 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
-
+import React, { useEffect, useState } from "react";
 import { View, Text, Pressable, StyleSheet, Alert } from "react-native";
 
-import { useAudioStream } from "expo-audio";
-
-import { requestAudioPermission } from "../../services/vosk/audioPermission";
-
-import { startListening, stopListening } from "../../services/vosk/audioStream";
-
-import { detectSpeech } from "../../services/vosk/speechDetection";
-
-import { pcmToWav } from "../../services/vosk/pcmToWav";
-
-import { transcribeAudio } from "../../axios/actions";
+import {
+  AudioModule,
+  RecordingPresets,
+  setAudioModeAsync,
+  useAudioRecorder,
+  useAudioRecorderState,
+  useAudioPlayer,
+} from "expo-audio";
 
 export default function AudioRecorder() {
-  const [permissionGranted, setPermissionGranted] = useState(false);
+  const [recordingUri, setRecordingUri] = useState(null);
 
-  const [voiceDetected, setVoiceDetected] = useState(false);
+  const [playing, setPlaying] = useState(false);
 
-  const [transcript, setTranscript] = useState("");
+  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
 
-  const [processing, setProcessing] = useState(false);
+  const recorderState = useAudioRecorderState(recorder);
 
-  const [error, setError] = useState(null);
+  const player = useAudioPlayer(recordingUri);
 
-  // ========================================
-  // REFS
-  // ========================================
+  // ==========================================
+  // MICROPHONE PERMISSION
+  // ==========================================
 
-  const mountedRef = useRef(true);
+  useEffect(() => {
+    requestPermission();
+  }, []);
 
-  const speechRef = useRef(false);
+  const requestPermission = async () => {
+    try {
+      const permission = await AudioModule.requestRecordingPermissionsAsync();
 
-  const silenceCounterRef = useRef(0);
+      if (!permission.granted) {
+        Alert.alert(
+          "Microphone Permission",
+          "Microphone permission allow karo.",
+        );
 
-  const speechChunksRef = useRef([]);
+        return;
+      }
 
-  const preRollRef = useRef([]);
+      await setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true,
+      });
+    } catch (error) {
+      console.error("Microphone permission error:", error);
+    }
+  };
 
-  const sampleRateRef = useRef(16000);
+  // ==========================================
+  // START RECORDING
+  // ==========================================
 
-  const channelsRef = useRef(1);
+  const startRecording = async () => {
+    try {
+      setRecordingUri(null);
 
-  /*
-   * Multiple requests ko order mein
-   * process karne ke liye.
-   */
-  const transcriptionQueueRef = useRef(Promise.resolve());
+      await recorder.prepareToRecordAsync();
 
-  // ========================================
-  // CONSTANTS
-  // ========================================
+      recorder.record();
 
-  const SPEECH_THRESHOLD = 0.025;
+      console.log("Recording started...");
+    } catch (error) {
+      console.error("Start recording error:", error);
 
-  /*
-   * Around 250-300ms previous
-   * audio keep karenge.
-   *
-   * Ye sirf RAM mein hai.
-   */
-  const MAX_PRE_ROLL = 4;
+      Alert.alert("Error", "Recording start nahi ho saki.");
+    }
+  };
 
-  /*
-   * Consecutive silent buffers.
-   */
-  const SILENCE_BUFFERS = 8;
+  // ==========================================
+  // STOP RECORDING
+  // ==========================================
 
-  // ========================================
-  // SEND TO VOSK
-  // ========================================
+  const stopRecording = async () => {
+    try {
+      await recorder.stop();
 
-  const sendSpeechToVosk = useCallback((chunks, sampleRate, channels) => {
-    if (!chunks || chunks.length === 0) {
+      const uri = recorder.uri;
+
+      if (uri) {
+        setRecordingUri(uri);
+
+        console.log("Recording ready:", uri);
+      }
+    } catch (error) {
+      console.error("Stop recording error:", error);
+
+      Alert.alert("Error", "Recording stop nahi ho saki.");
+    }
+  };
+
+  // ==========================================
+  // PLAY
+  // ==========================================
+
+  const playRecording = () => {
+    if (!recordingUri) {
+      Alert.alert("No Recording", "Pehle voice record karo.");
+
       return;
     }
 
-    /*
-     * Queue request.
-     *
-     * Microphone listening band nahi hota.
-     */
-    transcriptionQueueRef.current = transcriptionQueueRef.current.then(
-      async () => {
-        try {
-          if (mountedRef.current) {
-            setProcessing(true);
-          }
-
-          // PCM -> WAV Blob
-          const wavBlob = pcmToWav(chunks, sampleRate, channels);
-
-          /*
-           * Direct server upload.
-           *
-           * Disk par koi file save nahi.
-           */
-          const result = await transcribeAudio(wavBlob);
-
-          console.log("Vosk Transcript =>", result);
-
-          /*
-           * Common response formats
-           */
-          const text =
-            typeof result === "string"
-              ? result
-              : result?.text || result?.transcript || "";
-
-          if (mountedRef.current && text) {
-            setTranscript(text);
-          }
-        } catch (error) {
-          console.error("Vosk request error:", error);
-
-          if (mountedRef.current) {
-            setError(error?.message || "Vosk request failed");
-          }
-        } finally {
-          if (mountedRef.current) {
-            setProcessing(false);
-          }
-        }
-      },
-    );
-  }, []);
-
-  // ========================================
-  // AUDIO BUFFER
-  // ========================================
-
-  const handleAudioBuffer = useCallback(
-    (buffer) => {
-      if (!buffer?.data) {
-        return;
-      }
-
-      /*
-       * Actual hardware values use karo.
-       */
-      sampleRateRef.current = buffer.sampleRate || 16000;
-
-      channelsRef.current = buffer.channels || 1;
-
-      const data = buffer.data;
-
-      const result = detectSpeech(data, SPEECH_THRESHOLD);
-
-      const isSpeech = result.speech;
-
-      // ====================================
-      // PRE-ROLL
-      // ====================================
-
-      /*
-       * Last few buffers RAM mein.
-       * Voice start hone par beginning cut nahi hogi.
-       */
-      if (!speechRef.current) {
-        preRollRef.current.push(data.slice(0));
-
-        if (preRollRef.current.length > MAX_PRE_ROLL) {
-          preRollRef.current.shift();
-        }
-      }
-
-      // ====================================
-      // SPEECH START
-      // ====================================
-
-      if (isSpeech) {
-        silenceCounterRef.current = 0;
-
-        if (!speechRef.current) {
-          speechRef.current = true;
-
-          /*
-           * Pre-roll + current buffer
-           */
-          speechChunksRef.current = [...preRollRef.current];
-
-          preRollRef.current = [];
-
-          if (mountedRef.current) {
-            setVoiceDetected(true);
-            setError(null);
-          }
-
-          console.log("VOICE START");
-        }
-
-        /*
-         * Current speech buffer
-         */
-        speechChunksRef.current.push(data.slice(0));
-
-        return;
-      }
-
-      // ====================================
-      // SILENCE AFTER SPEECH
-      // ====================================
-
-      if (speechRef.current) {
-        /*
-         * Trailing silence bhi
-         * temporarily include kar rahe hain.
-         */
-        speechChunksRef.current.push(data.slice(0));
-
-        silenceCounterRef.current += 1;
-
-        if (silenceCounterRef.current >= SILENCE_BUFFERS) {
-          const chunks = speechChunksRef.current;
-
-          const sampleRate = sampleRateRef.current;
-
-          const channels = channelsRef.current;
-
-          /*
-           * IMPORTANT:
-           * References immediately clear.
-           *
-           * Audio permanently save nahi hota.
-           */
-          speechChunksRef.current = [];
-
-          silenceCounterRef.current = 0;
-
-          speechRef.current = false;
-
-          preRollRef.current = [];
-
-          if (mountedRef.current) {
-            setVoiceDetected(false);
-          }
-
-          console.log("VOICE END");
-
-          /*
-           * Server ko memory se send.
-           */
-          sendSpeechToVosk(chunks, sampleRate, channels);
-        }
-      }
-    },
-    [sendSpeechToVosk],
-  );
-
-  // ========================================
-  // AUDIO STREAM
-  // ========================================
-
-  const audioStreamResult = useAudioStream({
-    sampleRate: 16000,
-    channels: 1,
-    encoding: "int16",
-    onBuffer: handleAudioBuffer,
-  });
-
-  const stream = audioStreamResult.stream;
-
-  const isStreaming = audioStreamResult.isStreaming;
-
-  // ========================================
-  // INITIALIZE
-  // ========================================
-
-  useEffect(() => {
-    mountedRef.current = true;
-
-    initialize();
-
-    return () => {
-      mountedRef.current = false;
-
-      speechRef.current = false;
-
-      speechChunksRef.current = [];
-
-      preRollRef.current = [];
-
-      /*
-       * Component unmount:
-       * microphone stop.
-       */
-      if (stream?.isStreaming) {
-        stream.stop().catch(() => {});
-      }
-    };
-  }, [stream]);
-
-  const initialize = async () => {
     try {
-      setError(null);
+      player.seekTo(0);
 
-      await requestAudioPermission();
+      player.play();
 
-      if (!mountedRef.current) {
-        return;
-      }
+      setPlaying(true);
 
-      setPermissionGranted(true);
-
-      await startListening(stream);
-
-      console.log("Always listening started");
+      console.log("Playing recording...");
     } catch (error) {
-      console.error("Audio initialization error:", error);
-
-      if (mountedRef.current) {
-        setError(error?.message || "Microphone error");
-
-        Alert.alert(
-          "Microphone Error",
-          error?.message || "Microphone start nahi ho saka.",
-        );
-      }
+      console.error("Playback error:", error);
     }
   };
 
-  // ========================================
-  // MANUAL STOP
-  // ========================================
+  // ==========================================
+  // STOP PLAYBACK
+  // ==========================================
 
-  const handleStop = async () => {
+  const stopPlayback = () => {
     try {
-      await stopListening(stream);
+      player.pause();
 
-      speechRef.current = false;
+      player.seekTo(0);
 
-      speechChunksRef.current = [];
-
-      silenceCounterRef.current = 0;
-
-      if (mountedRef.current) {
-        setVoiceDetected(false);
-      }
+      setPlaying(false);
     } catch (error) {
-      console.error("Stop listening error:", error);
+      console.error("Stop playback error:", error);
     }
   };
 
-  // ========================================
-  // MANUAL START
-  // ========================================
-
-  const handleStart = async () => {
-    try {
-      setError(null);
-
-      await startListening(stream);
-    } catch (error) {
-      console.error("Start listening error:", error);
-    }
-  };
-
-  // ========================================
+  // ==========================================
   // UI
-  // ========================================
+  // ==========================================
 
   return (
     <View style={styles.container}>
       <View style={styles.card}>
-        <Text style={styles.title}>Voice Assistant</Text>
+        <Text style={styles.title}>Voice Recorder</Text>
 
-        <View
-          style={[
-            styles.statusBox,
-
-            voiceDetected
-              ? styles.voiceActive
-              : isStreaming
-                ? styles.listening
-                : styles.stopped,
-          ]}
-        >
-          <View
-            style={[
-              styles.dot,
-
-              voiceDetected
-                ? styles.voiceDot
-                : isStreaming
-                  ? styles.listeningDot
-                  : styles.stoppedDot,
-            ]}
-          />
-
-          <Text style={styles.statusText}>
-            {voiceDetected
-              ? "Voice Detected"
-              : isStreaming
-                ? "Always Listening..."
-                : "Listening Stopped"}
-          </Text>
-        </View>
-
-        <Text style={styles.info}>
-          Microphone continuously listen kar raha hai.
+        <Text style={styles.status}>
+          {recorderState.isRecording
+            ? "🔴 Recording..."
+            : playing
+              ? "▶ Playing..."
+              : recordingUri
+                ? "Recording ready"
+                : "Ready"}
         </Text>
 
-        <Text style={styles.info}>Audio file device par save nahi hoti.</Text>
+        <Text style={styles.duration}>
+          {Math.floor((recorderState.durationMillis || 0) / 1000)} sec
+        </Text>
 
-        <Text style={styles.format}>Live PCM • 16 kHz • Mono • Int16</Text>
-
-        {processing && (
-          <View style={styles.processingBox}>
-            <Text style={styles.processingText}>Vosk is processing...</Text>
-          </View>
-        )}
-
-        {transcript ? (
-          <View style={styles.transcriptBox}>
-            <Text style={styles.transcriptLabel}>Transcript</Text>
-
-            <Text style={styles.transcript}>{transcript}</Text>
-          </View>
-        ) : null}
-
-        {error && (
-          <View style={styles.errorBox}>
-            <Text style={styles.errorText}>{error}</Text>
-          </View>
-        )}
-
-        {!isStreaming ? (
-          <Pressable style={styles.startButton} onPress={handleStart}>
-            <Text style={styles.buttonText}>Start Listening</Text>
+        {!recorderState.isRecording ? (
+          <Pressable style={styles.recordButton} onPress={startRecording}>
+            <Text style={styles.buttonText}>🎤 Start Recording</Text>
           </Pressable>
         ) : (
-          <Pressable style={styles.stopButton} onPress={handleStop}>
-            <Text style={styles.buttonText}>Stop Listening</Text>
+          <Pressable style={styles.stopButton} onPress={stopRecording}>
+            <Text style={styles.buttonText}>⏹ Stop Recording</Text>
           </Pressable>
+        )}
+
+        {recordingUri && !recorderState.isRecording && (
+          <>
+            {!playing ? (
+              <Pressable style={styles.playButton} onPress={playRecording}>
+                <Text style={styles.playText}>▶ Play My Voice</Text>
+              </Pressable>
+            ) : (
+              <Pressable style={styles.stopPlayButton} onPress={stopPlayback}>
+                <Text style={styles.stopPlayText}>■ Stop Playback</Text>
+              </Pressable>
+            )}
+          </>
+        )}
+
+        {recordingUri && (
+          <Text style={styles.readyText}>Voice recording ready</Text>
         )}
       </View>
     </View>
@@ -457,117 +205,27 @@ const styles = StyleSheet.create({
     fontSize: 26,
     fontWeight: "700",
     color: "#111",
-    marginBottom: 18,
+    marginBottom: 10,
   },
 
-  statusBox: {
-    flexDirection: "row",
-    alignItems: "center",
-    padding: 15,
-    borderRadius: 14,
-    marginBottom: 16,
+  status: {
+    fontSize: 16,
+    color: "#555",
+    marginBottom: 8,
   },
 
-  listening: {
-    backgroundColor: "#f0fdf4",
-  },
-
-  voiceActive: {
-    backgroundColor: "#fef2f2",
-  },
-
-  stopped: {
-    backgroundColor: "#f3f4f6",
-  },
-
-  dot: {
-    width: 11,
-    height: 11,
-    borderRadius: 6,
-    marginRight: 10,
-  },
-
-  listeningDot: {
-    backgroundColor: "#16a34a",
-  },
-
-  voiceDot: {
-    backgroundColor: "#dc2626",
-  },
-
-  stoppedDot: {
-    backgroundColor: "#6b7280",
-  },
-
-  statusText: {
-    fontSize: 15,
-    fontWeight: "600",
-    color: "#111",
-  },
-
-  info: {
+  duration: {
     fontSize: 14,
-    lineHeight: 21,
-    color: "#666",
-    marginBottom: 5,
-  },
-
-  format: {
-    fontSize: 12,
-    color: "#999",
-    marginTop: 5,
+    color: "#888",
     marginBottom: 18,
   },
 
-  processingBox: {
-    backgroundColor: "#eff6ff",
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 12,
-  },
-
-  processingText: {
-    color: "#1d4ed8",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-
-  transcriptBox: {
-    backgroundColor: "#f9fafb",
-    borderRadius: 12,
-    padding: 14,
-    marginBottom: 15,
-  },
-
-  transcriptLabel: {
-    fontSize: 12,
-    color: "#777",
-    marginBottom: 5,
-  },
-
-  transcript: {
-    fontSize: 17,
-    color: "#111",
-    fontWeight: "500",
-  },
-
-  errorBox: {
-    backgroundColor: "#fef2f2",
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 15,
-  },
-
-  errorText: {
-    color: "#b91c1c",
-    fontSize: 13,
-  },
-
-  startButton: {
+  recordButton: {
     backgroundColor: "#111",
     borderRadius: 14,
     paddingVertical: 16,
     alignItems: "center",
+    marginBottom: 12,
   },
 
   stopButton: {
@@ -575,11 +233,48 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     paddingVertical: 16,
     alignItems: "center",
+    marginBottom: 12,
   },
 
   buttonText: {
     color: "#fff",
     fontSize: 16,
     fontWeight: "600",
+  },
+
+  playButton: {
+    borderWidth: 1,
+    borderColor: "#d1d5db",
+    borderRadius: 14,
+    paddingVertical: 16,
+    alignItems: "center",
+    marginBottom: 12,
+  },
+
+  playText: {
+    color: "#111",
+    fontSize: 16,
+    fontWeight: "600",
+  },
+
+  stopPlayButton: {
+    backgroundColor: "#f3f4f6",
+    borderRadius: 14,
+    paddingVertical: 16,
+    alignItems: "center",
+    marginBottom: 12,
+  },
+
+  stopPlayText: {
+    color: "#111",
+    fontSize: 16,
+    fontWeight: "600",
+  },
+
+  readyText: {
+    textAlign: "center",
+    color: "#777",
+    fontSize: 13,
+    marginTop: 4,
   },
 });
