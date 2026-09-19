@@ -1,52 +1,158 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+
 import { View, Text, Pressable, StyleSheet, Alert } from "react-native";
 
-import {
-  RecordingPresets,
-  useAudioRecorder,
-  useAudioRecorderState,
-  useAudioPlayer,
-} from "expo-audio";
+import { useAudioStream } from "expo-audio";
 
 import { requestAudioPermission } from "../../services/vosk/audioPermission";
-import { startRecording } from "../../services/vosk/recordAudio";
-import { stopRecording } from "../../services/vosk/stopRecording";
-import { playRecording, stopPlayback } from "../../services/vosk/playRecording";
+
+import { startListening, stopListening } from "../../services/vosk/audioStream";
+
+import { detectSpeech } from "../../services/vosk/speechDetection";
 
 export default function AudioRecorder() {
-  const [recordingUri, setRecordingUri] = useState(null);
-  const [ready, setReady] = useState(false);
+  const [permissionGranted, setPermissionGranted] = useState(false);
+
+  const [voiceDetected, setVoiceDetected] = useState(false);
+
   const [error, setError] = useState(null);
 
-  const initializedRef = useRef(false);
   const mountedRef = useRef(true);
 
-  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const speechRef = useRef(false);
 
-  const recorderState = useAudioRecorderState(recorder);
+  const silenceCounterRef = useRef(0);
 
-  const player = useAudioPlayer(recordingUri);
+  const noiseFloorRef = useRef(0.008);
 
-  useEffect(() => {
-    mountedRef.current = true;
-
-    initializeRecorder();
-
-    return () => {
-      // IMPORTANT:
-      // Yahan recorder.stop() mat karo.
-      // useAudioRecorder apna lifecycle khud manage karta hai.
-      mountedRef.current = false;
-    };
-  }, []);
-
-  const initializeRecorder = async () => {
-    if (initializedRef.current) {
+  /*
+   * Ye callback har PCM audio buffer par chalega.
+   *
+   * IMPORTANT:
+   * Yahan koi file save nahi ho rahi.
+   *
+   * Isi jagah baad mein:
+   *
+   * sendToVosk(buffer)
+   *
+   * lagaya ja sakta hai.
+   */
+  const handleAudioBuffer = useCallback((buffer) => {
+    if (!buffer?.data) {
       return;
     }
 
-    initializedRef.current = true;
+    const result = detectSpeech(
+      buffer.data,
+      Math.max(0.025, noiseFloorRef.current * 2.5),
+    );
 
+    const { rms, speech } = result;
+
+    /*
+     * Silence ke waqt environment ka
+     * noise level slowly calculate karo.
+     */
+    if (!speech && !speechRef.current) {
+      noiseFloorRef.current = noiseFloorRef.current * 0.95 + rms * 0.05;
+    }
+
+    /*
+     * Voice START
+     */
+    if (speech) {
+      silenceCounterRef.current = 0;
+
+      if (!speechRef.current) {
+        speechRef.current = true;
+
+        if (mountedRef.current) {
+          setVoiceDetected(true);
+        }
+
+        console.log("VOICE DETECTED");
+      }
+
+      /*
+       * =====================================
+       * VOSK AUDIO INPUT
+       * =====================================
+       *
+       * buffer.data = raw PCM ArrayBuffer
+       *
+       * Example:
+       *
+       * sendToVosk(buffer.data);
+       *
+       * Abhi intentionally kuch save nahi kar rahe.
+       */
+      console.log(
+        "Speech audio:",
+        rms.toFixed(4),
+        "sampleRate:",
+        buffer.sampleRate,
+      );
+    } else if (speechRef.current) {
+
+    /*
+     * Voice END
+     *
+     * Kuch consecutive silent buffers
+     * milne ke baad voice segment close.
+     */
+      silenceCounterRef.current += 1;
+
+      if (silenceCounterRef.current >= 8) {
+        speechRef.current = false;
+
+        silenceCounterRef.current = 0;
+
+        if (mountedRef.current) {
+          setVoiceDetected(false);
+        }
+
+        console.log("VOICE ENDED");
+      }
+    }
+  }, []);
+
+  /*
+   * ALWAYS-ON RAW PCM STREAM
+   */
+  const audioStreamResult = useAudioStream({
+    sampleRate: 16000,
+    channels: 1,
+    encoding: "int16",
+    onBuffer: handleAudioBuffer,
+  });
+
+  const stream = audioStreamResult.stream;
+
+  const isStreaming = audioStreamResult.isStreaming;
+
+  /*
+   * Initialize
+   */
+  useEffect(() => {
+    mountedRef.current = true;
+
+    initialize();
+
+    return () => {
+      mountedRef.current = false;
+
+      /*
+       * Important:
+       * component unmount hone par stream ko
+       * safely stop karo.
+       */
+      if (stream?.isStreaming) {
+        stream.stop().catch(() => {});
+      }
+    };
+  }, [stream]);
+
+  const initialize = async () => {
     try {
       setError(null);
 
@@ -56,101 +162,56 @@ export default function AudioRecorder() {
         return;
       }
 
-      setReady(true);
+      setPermissionGranted(true);
 
-      await startRecording(recorder);
+      await startListening(stream);
 
       console.log("Always listening started");
     } catch (error) {
-      initializedRef.current = false;
-
       console.error("Audio initialization error:", error);
 
       if (mountedRef.current) {
-        setError(error?.message || "Microphone error");
+        setError(error?.message || "Microphone start nahi ho saka.");
 
         Alert.alert(
           "Microphone Error",
-          error?.message || "Microphone start nahi ho saka.",
+          error?.message ||
+            "Microphone permission ya audio stream start nahi ho saka.",
         );
       }
     }
   };
 
-  // =========================================
-  // START RECORDING
-  // =========================================
-
-  const handleStart = async () => {
-    try {
-      if (recorderState.isRecording) {
-        return;
-      }
-
-      setError(null);
-
-      await startRecording(recorder);
-
-      console.log("Recording started");
-    } catch (error) {
-      console.error("Start recording error:", error);
-
-      Alert.alert("Error", "Recording start nahi ho saki.");
-    }
-  };
-
-  // =========================================
-  // STOP RECORDING
-  // =========================================
-
+  /*
+   * MANUAL STOP
+   */
   const handleStop = async () => {
     try {
-      if (!recorderState.isRecording) {
-        return;
-      }
+      await stopListening(stream);
 
-      const uri = await stopRecording(recorder);
+      speechRef.current = false;
+      silenceCounterRef.current = 0;
 
-      console.log("Recording stopped:", uri);
+      setVoiceDetected(false);
 
-      if (mountedRef.current && uri) {
-        setRecordingUri(uri);
-      }
+      console.log("Listening stopped");
     } catch (error) {
-      console.error("Stop recording error:", error);
-
-      Alert.alert("Error", "Recording stop nahi ho saki.");
+      console.error("Stop listening error:", error);
     }
   };
 
-  // =========================================
-  // PLAY
-  // =========================================
-
-  const handlePlay = () => {
-    if (!recordingUri) {
-      Alert.alert("No Recording", "Pehle recording stop karo.");
-      return;
-    }
-
+  /*
+   * MANUAL START
+   */
+  const handleStart = async () => {
     try {
-      playRecording(player);
+      setError(null);
+
+      await startListening(stream);
+
+      console.log("Listening started");
     } catch (error) {
-      console.error("Playback error:", error);
-
-      Alert.alert("Playback Error", "Voice play nahi ho saki.");
-    }
-  };
-
-  // =========================================
-  // STOP PLAYBACK
-  // =========================================
-
-  const handleStopPlayback = () => {
-    try {
-      stopPlayback(player);
-    } catch (error) {
-      console.error("Stop playback error:", error);
+      console.error("Start listening error:", error);
     }
   };
 
@@ -161,30 +222,42 @@ export default function AudioRecorder() {
 
         <View
           style={[
-            styles.statusContainer,
-            recorderState.isRecording ? styles.listening : styles.stopped,
+            styles.statusBox,
+            voiceDetected
+              ? styles.voiceActive
+              : isStreaming
+                ? styles.listening
+                : styles.stopped,
           ]}
         >
           <View
             style={[
-              styles.statusDot,
-              recorderState.isRecording ? styles.redDot : styles.grayDot,
+              styles.dot,
+              voiceDetected
+                ? styles.voiceDot
+                : isStreaming
+                  ? styles.listeningDot
+                  : styles.stoppedDot,
             ]}
           />
 
           <Text style={styles.statusText}>
-            {recorderState.isRecording
-              ? "Always Listening..."
-              : ready
-                ? "Listening Stopped"
-                : "Initializing..."}
+            {voiceDetected
+              ? "Voice Detected"
+              : isStreaming
+                ? "Always Listening..."
+                : "Listening Stopped"}
           </Text>
         </View>
 
-        <Text style={styles.duration}>
-          Recording Time:{" "}
-          {Math.floor((recorderState.durationMillis || 0) / 1000)} sec
+        <Text style={styles.info}>
+          Microphone continuously listen kar raha hai. Audio file save nahi
+          hoti.
         </Text>
+
+        {permissionGranted && (
+          <Text style={styles.format}>PCM • 16 kHz • Mono • Int16</Text>
+        )}
 
         {error && (
           <View style={styles.errorBox}>
@@ -192,32 +265,14 @@ export default function AudioRecorder() {
           </View>
         )}
 
-        {recorderState.isRecording ? (
-          <Pressable style={styles.stopButton} onPress={handleStop}>
-            <Text style={styles.buttonText}>Stop Recording</Text>
-          </Pressable>
-        ) : (
-          <Pressable style={styles.recordButton} onPress={handleStart}>
+        {!isStreaming ? (
+          <Pressable style={styles.startButton} onPress={handleStart}>
             <Text style={styles.buttonText}>Start Listening</Text>
           </Pressable>
-        )}
-
-        <Pressable style={styles.secondaryButton} onPress={handlePlay}>
-          <Text style={styles.secondaryText}>▶ Play My Voice</Text>
-        </Pressable>
-
-        <Pressable style={styles.secondaryButton} onPress={handleStopPlayback}>
-          <Text style={styles.secondaryText}>■ Stop Playback</Text>
-        </Pressable>
-
-        {recordingUri && (
-          <View style={styles.fileBox}>
-            <Text style={styles.fileLabel}>Last Recording</Text>
-
-            <Text style={styles.fileText} numberOfLines={2}>
-              {recordingUri}
-            </Text>
-          </View>
+        ) : (
+          <Pressable style={styles.stopButton} onPress={handleStop}>
+            <Text style={styles.buttonText}>Stop Listening</Text>
+          </Pressable>
         )}
       </View>
     </View>
@@ -244,15 +299,19 @@ const styles = StyleSheet.create({
     marginBottom: 18,
   },
 
-  statusContainer: {
+  statusBox: {
     flexDirection: "row",
     alignItems: "center",
-    padding: 14,
-    borderRadius: 12,
-    marginBottom: 14,
+    padding: 15,
+    borderRadius: 14,
+    marginBottom: 16,
   },
 
   listening: {
+    backgroundColor: "#f0fdf4",
+  },
+
+  voiceActive: {
     backgroundColor: "#fef2f2",
   },
 
@@ -260,18 +319,22 @@ const styles = StyleSheet.create({
     backgroundColor: "#f3f4f6",
   },
 
-  statusDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
+  dot: {
+    width: 11,
+    height: 11,
+    borderRadius: 6,
     marginRight: 10,
   },
 
-  redDot: {
+  listeningDot: {
+    backgroundColor: "#16a34a",
+  },
+
+  voiceDot: {
     backgroundColor: "#dc2626",
   },
 
-  grayDot: {
+  stoppedDot: {
     backgroundColor: "#6b7280",
   },
 
@@ -281,10 +344,17 @@ const styles = StyleSheet.create({
     color: "#111",
   },
 
-  duration: {
+  info: {
     fontSize: 14,
+    lineHeight: 21,
     color: "#666",
-    marginBottom: 18,
+    marginBottom: 8,
+  },
+
+  format: {
+    fontSize: 12,
+    color: "#999",
+    marginBottom: 20,
   },
 
   errorBox: {
@@ -299,12 +369,11 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
 
-  recordButton: {
+  startButton: {
     backgroundColor: "#111",
     borderRadius: 14,
     paddingVertical: 16,
     alignItems: "center",
-    marginBottom: 12,
   },
 
   stopButton: {
@@ -312,45 +381,11 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     paddingVertical: 16,
     alignItems: "center",
-    marginBottom: 12,
   },
 
   buttonText: {
     color: "#fff",
     fontSize: 16,
     fontWeight: "600",
-  },
-
-  secondaryButton: {
-    borderWidth: 1,
-    borderColor: "#d1d5db",
-    borderRadius: 14,
-    paddingVertical: 16,
-    alignItems: "center",
-    marginBottom: 12,
-  },
-
-  secondaryText: {
-    color: "#111",
-    fontSize: 16,
-    fontWeight: "600",
-  },
-
-  fileBox: {
-    backgroundColor: "#f9fafb",
-    borderRadius: 12,
-    padding: 12,
-    marginTop: 5,
-  },
-
-  fileLabel: {
-    fontSize: 12,
-    color: "#777",
-    marginBottom: 5,
-  },
-
-  fileText: {
-    fontSize: 12,
-    color: "#444",
   },
 });

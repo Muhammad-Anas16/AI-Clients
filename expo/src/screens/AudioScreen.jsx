@@ -1,4 +1,5 @@
 import React from "react";
+
 import { View, Text, StyleSheet, ScrollView } from "react-native";
 
 import AudioRecorder from "../components/vosk/AudioRecorder";
@@ -13,9 +14,7 @@ export default function AudioScreen() {
       >
         <Text style={styles.heading}>Voice Assistant</Text>
 
-        <Text style={styles.subtitle}>
-          Your microphone starts listening automatically.
-        </Text>
+        <Text style={styles.subtitle}>Always listening for your voice</Text>
 
         <AudioRecorder />
       </ScrollView>
