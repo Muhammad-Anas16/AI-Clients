@@ -1,4 +1,12 @@
+import { getServerURL } from "../utils/ipStorage";
+
+// Get complete server URL
 export const getIp = async () => {
-  const res = await getServerIP();
-  console.log("User IP =>", res);
+  try {
+    const url = await getServerURL();
+    const result = `${url}/api`
+    return result;
+  } catch (error) {
+    return null;
+  }
 };

@@ -10,12 +10,24 @@ import { startListening, stopListening } from "../../services/vosk/audioStream";
 
 import { detectSpeech } from "../../services/vosk/speechDetection";
 
+import { pcmToWav } from "../../services/vosk/pcmToWav";
+
+import { transcribeAudio } from "../../axios/actions";
+
 export default function AudioRecorder() {
   const [permissionGranted, setPermissionGranted] = useState(false);
 
   const [voiceDetected, setVoiceDetected] = useState(false);
 
+  const [transcript, setTranscript] = useState("");
+
+  const [processing, setProcessing] = useState(false);
+
   const [error, setError] = useState(null);
+
+  // ========================================
+  // REFS
+  // ========================================
 
   const mountedRef = useRef(true);
 
@@ -23,102 +35,224 @@ export default function AudioRecorder() {
 
   const silenceCounterRef = useRef(0);
 
-  const noiseFloorRef = useRef(0.008);
+  const speechChunksRef = useRef([]);
+
+  const preRollRef = useRef([]);
+
+  const sampleRateRef = useRef(16000);
+
+  const channelsRef = useRef(1);
 
   /*
-   * Ye callback har PCM audio buffer par chalega.
-   *
-   * IMPORTANT:
-   * Yahan koi file save nahi ho rahi.
-   *
-   * Isi jagah baad mein:
-   *
-   * sendToVosk(buffer)
-   *
-   * lagaya ja sakta hai.
+   * Multiple requests ko order mein
+   * process karne ke liye.
    */
-  const handleAudioBuffer = useCallback((buffer) => {
-    if (!buffer?.data) {
+  const transcriptionQueueRef = useRef(Promise.resolve());
+
+  // ========================================
+  // CONSTANTS
+  // ========================================
+
+  const SPEECH_THRESHOLD = 0.025;
+
+  /*
+   * Around 250-300ms previous
+   * audio keep karenge.
+   *
+   * Ye sirf RAM mein hai.
+   */
+  const MAX_PRE_ROLL = 4;
+
+  /*
+   * Consecutive silent buffers.
+   */
+  const SILENCE_BUFFERS = 8;
+
+  // ========================================
+  // SEND TO VOSK
+  // ========================================
+
+  const sendSpeechToVosk = useCallback((chunks, sampleRate, channels) => {
+    if (!chunks || chunks.length === 0) {
       return;
     }
 
-    const result = detectSpeech(
-      buffer.data,
-      Math.max(0.025, noiseFloorRef.current * 2.5),
-    );
-
-    const { rms, speech } = result;
-
     /*
-     * Silence ke waqt environment ka
-     * noise level slowly calculate karo.
+     * Queue request.
+     *
+     * Microphone listening band nahi hota.
      */
-    if (!speech && !speechRef.current) {
-      noiseFloorRef.current = noiseFloorRef.current * 0.95 + rms * 0.05;
-    }
+    transcriptionQueueRef.current = transcriptionQueueRef.current.then(
+      async () => {
+        try {
+          if (mountedRef.current) {
+            setProcessing(true);
+          }
 
-    /*
-     * Voice START
-     */
-    if (speech) {
-      silenceCounterRef.current = 0;
+          // PCM -> WAV Blob
+          const wavBlob = pcmToWav(chunks, sampleRate, channels);
 
-      if (!speechRef.current) {
-        speechRef.current = true;
+          /*
+           * Direct server upload.
+           *
+           * Disk par koi file save nahi.
+           */
+          const result = await transcribeAudio(wavBlob);
 
-        if (mountedRef.current) {
-          setVoiceDetected(true);
+          console.log("Vosk Transcript =>", result);
+
+          /*
+           * Common response formats
+           */
+          const text =
+            typeof result === "string"
+              ? result
+              : result?.text || result?.transcript || "";
+
+          if (mountedRef.current && text) {
+            setTranscript(text);
+          }
+        } catch (error) {
+          console.error("Vosk request error:", error);
+
+          if (mountedRef.current) {
+            setError(error?.message || "Vosk request failed");
+          }
+        } finally {
+          if (mountedRef.current) {
+            setProcessing(false);
+          }
         }
+      },
+    );
+  }, []);
 
-        console.log("VOICE DETECTED");
+  // ========================================
+  // AUDIO BUFFER
+  // ========================================
+
+  const handleAudioBuffer = useCallback(
+    (buffer) => {
+      if (!buffer?.data) {
+        return;
       }
 
       /*
-       * =====================================
-       * VOSK AUDIO INPUT
-       * =====================================
-       *
-       * buffer.data = raw PCM ArrayBuffer
-       *
-       * Example:
-       *
-       * sendToVosk(buffer.data);
-       *
-       * Abhi intentionally kuch save nahi kar rahe.
+       * Actual hardware values use karo.
        */
-      console.log(
-        "Speech audio:",
-        rms.toFixed(4),
-        "sampleRate:",
-        buffer.sampleRate,
-      );
-    } else if (speechRef.current) {
+      sampleRateRef.current = buffer.sampleRate || 16000;
 
-    /*
-     * Voice END
-     *
-     * Kuch consecutive silent buffers
-     * milne ke baad voice segment close.
-     */
-      silenceCounterRef.current += 1;
+      channelsRef.current = buffer.channels || 1;
 
-      if (silenceCounterRef.current >= 8) {
-        speechRef.current = false;
+      const data = buffer.data;
 
+      const result = detectSpeech(data, SPEECH_THRESHOLD);
+
+      const isSpeech = result.speech;
+
+      // ====================================
+      // PRE-ROLL
+      // ====================================
+
+      /*
+       * Last few buffers RAM mein.
+       * Voice start hone par beginning cut nahi hogi.
+       */
+      if (!speechRef.current) {
+        preRollRef.current.push(data.slice(0));
+
+        if (preRollRef.current.length > MAX_PRE_ROLL) {
+          preRollRef.current.shift();
+        }
+      }
+
+      // ====================================
+      // SPEECH START
+      // ====================================
+
+      if (isSpeech) {
         silenceCounterRef.current = 0;
 
-        if (mountedRef.current) {
-          setVoiceDetected(false);
+        if (!speechRef.current) {
+          speechRef.current = true;
+
+          /*
+           * Pre-roll + current buffer
+           */
+          speechChunksRef.current = [...preRollRef.current];
+
+          preRollRef.current = [];
+
+          if (mountedRef.current) {
+            setVoiceDetected(true);
+            setError(null);
+          }
+
+          console.log("VOICE START");
         }
 
-        console.log("VOICE ENDED");
-      }
-    }
-  }, []);
+        /*
+         * Current speech buffer
+         */
+        speechChunksRef.current.push(data.slice(0));
 
-  /*
-   * ALWAYS-ON RAW PCM STREAM
-   */
+        return;
+      }
+
+      // ====================================
+      // SILENCE AFTER SPEECH
+      // ====================================
+
+      if (speechRef.current) {
+        /*
+         * Trailing silence bhi
+         * temporarily include kar rahe hain.
+         */
+        speechChunksRef.current.push(data.slice(0));
+
+        silenceCounterRef.current += 1;
+
+        if (silenceCounterRef.current >= SILENCE_BUFFERS) {
+          const chunks = speechChunksRef.current;
+
+          const sampleRate = sampleRateRef.current;
+
+          const channels = channelsRef.current;
+
+          /*
+           * IMPORTANT:
+           * References immediately clear.
+           *
+           * Audio permanently save nahi hota.
+           */
+          speechChunksRef.current = [];
+
+          silenceCounterRef.current = 0;
+
+          speechRef.current = false;
+
+          preRollRef.current = [];
+
+          if (mountedRef.current) {
+            setVoiceDetected(false);
+          }
+
+          console.log("VOICE END");
+
+          /*
+           * Server ko memory se send.
+           */
+          sendSpeechToVosk(chunks, sampleRate, channels);
+        }
+      }
+    },
+    [sendSpeechToVosk],
+  );
+
+  // ========================================
+  // AUDIO STREAM
+  // ========================================
+
   const audioStreamResult = useAudioStream({
     sampleRate: 16000,
     channels: 1,
@@ -130,9 +264,10 @@ export default function AudioRecorder() {
 
   const isStreaming = audioStreamResult.isStreaming;
 
-  /*
-   * Initialize
-   */
+  // ========================================
+  // INITIALIZE
+  // ========================================
+
   useEffect(() => {
     mountedRef.current = true;
 
@@ -141,10 +276,15 @@ export default function AudioRecorder() {
     return () => {
       mountedRef.current = false;
 
+      speechRef.current = false;
+
+      speechChunksRef.current = [];
+
+      preRollRef.current = [];
+
       /*
-       * Important:
-       * component unmount hone par stream ko
-       * safely stop karo.
+       * Component unmount:
+       * microphone stop.
        */
       if (stream?.isStreaming) {
         stream.stop().catch(() => {});
@@ -171,49 +311,55 @@ export default function AudioRecorder() {
       console.error("Audio initialization error:", error);
 
       if (mountedRef.current) {
-        setError(error?.message || "Microphone start nahi ho saka.");
+        setError(error?.message || "Microphone error");
 
         Alert.alert(
           "Microphone Error",
-          error?.message ||
-            "Microphone permission ya audio stream start nahi ho saka.",
+          error?.message || "Microphone start nahi ho saka.",
         );
       }
     }
   };
 
-  /*
-   * MANUAL STOP
-   */
+  // ========================================
+  // MANUAL STOP
+  // ========================================
+
   const handleStop = async () => {
     try {
       await stopListening(stream);
 
       speechRef.current = false;
+
+      speechChunksRef.current = [];
+
       silenceCounterRef.current = 0;
 
-      setVoiceDetected(false);
-
-      console.log("Listening stopped");
+      if (mountedRef.current) {
+        setVoiceDetected(false);
+      }
     } catch (error) {
       console.error("Stop listening error:", error);
     }
   };
 
-  /*
-   * MANUAL START
-   */
+  // ========================================
+  // MANUAL START
+  // ========================================
+
   const handleStart = async () => {
     try {
       setError(null);
 
       await startListening(stream);
-
-      console.log("Listening started");
     } catch (error) {
       console.error("Start listening error:", error);
     }
   };
+
+  // ========================================
+  // UI
+  // ========================================
 
   return (
     <View style={styles.container}>
@@ -223,6 +369,7 @@ export default function AudioRecorder() {
         <View
           style={[
             styles.statusBox,
+
             voiceDetected
               ? styles.voiceActive
               : isStreaming
@@ -233,6 +380,7 @@ export default function AudioRecorder() {
           <View
             style={[
               styles.dot,
+
               voiceDetected
                 ? styles.voiceDot
                 : isStreaming
@@ -251,13 +399,26 @@ export default function AudioRecorder() {
         </View>
 
         <Text style={styles.info}>
-          Microphone continuously listen kar raha hai. Audio file save nahi
-          hoti.
+          Microphone continuously listen kar raha hai.
         </Text>
 
-        {permissionGranted && (
-          <Text style={styles.format}>PCM • 16 kHz • Mono • Int16</Text>
+        <Text style={styles.info}>Audio file device par save nahi hoti.</Text>
+
+        <Text style={styles.format}>Live PCM • 16 kHz • Mono • Int16</Text>
+
+        {processing && (
+          <View style={styles.processingBox}>
+            <Text style={styles.processingText}>Vosk is processing...</Text>
+          </View>
         )}
+
+        {transcript ? (
+          <View style={styles.transcriptBox}>
+            <Text style={styles.transcriptLabel}>Transcript</Text>
+
+            <Text style={styles.transcript}>{transcript}</Text>
+          </View>
+        ) : null}
 
         {error && (
           <View style={styles.errorBox}>
@@ -348,13 +509,46 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 21,
     color: "#666",
-    marginBottom: 8,
+    marginBottom: 5,
   },
 
   format: {
     fontSize: 12,
     color: "#999",
-    marginBottom: 20,
+    marginTop: 5,
+    marginBottom: 18,
+  },
+
+  processingBox: {
+    backgroundColor: "#eff6ff",
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 12,
+  },
+
+  processingText: {
+    color: "#1d4ed8",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+
+  transcriptBox: {
+    backgroundColor: "#f9fafb",
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 15,
+  },
+
+  transcriptLabel: {
+    fontSize: 12,
+    color: "#777",
+    marginBottom: 5,
+  },
+
+  transcript: {
+    fontSize: 17,
+    color: "#111",
+    fontWeight: "500",
   },
 
   errorBox: {

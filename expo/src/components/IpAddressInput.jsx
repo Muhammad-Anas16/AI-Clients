@@ -1,4 +1,5 @@
 import React, { useRef } from "react";
+
 import { View, Text, TextInput, StyleSheet } from "react-native";
 
 export default function IpAddressInput({ values, setValues }) {
@@ -8,7 +9,9 @@ export default function IpAddressInput({ values, setValues }) {
     const clean = text.replace(/[^0-9]/g, "").slice(0, 3);
 
     const updated = [...values];
+
     updated[index] = clean;
+
     setValues(updated);
 
     if (clean.length === 3 && index < 3) {
@@ -39,10 +42,10 @@ export default function IpAddressInput({ values, setValues }) {
             onKeyPress={(event) => handleKeyPress(event, index)}
             keyboardType="number-pad"
             maxLength={3}
-            placeholder="000"
             style={styles.box}
             textAlign="center"
             selectTextOnFocus
+            autoCorrect={false}
           />
 
           {index < 3 && <Text style={styles.dot}>.</Text>}
@@ -75,6 +78,7 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     backgroundColor: "#f9fafb",
     color: "#111",
+    textAlign: "center",
   },
 
   dot: {

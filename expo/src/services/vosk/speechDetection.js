@@ -13,6 +13,7 @@ export function calculateRMS(arrayBuffer) {
 
   for (let i = 0; i < samples.length; i++) {
     const normalized = samples[i] / 32768;
+
     sum += normalized * normalized;
   }
 

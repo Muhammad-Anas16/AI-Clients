@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
+
 import {
   View,
   Text,
@@ -10,14 +11,11 @@ import {
 } from "react-native";
 
 import {
-  saveServerConfig,
-  getServerIP,
-  getServerPort,
-  deleteServerConfig,
-  saveTheme,
-  getTheme,
-  getServerURL,
-} from "../utils/ipStorage";
+  loadSettings,
+  saveServer,
+  deleteServer,
+  updateTheme,
+} from "../services/setting/settingsService";
 
 import IpAddressInput from "../components/IpAddressInput";
 import ThemeSelector from "../components/ThemeSelector";
@@ -25,85 +23,109 @@ import BottomNavigation from "../components/BottomNavigation";
 
 export default function SettingsScreen() {
   const [ipParts, setIpParts] = useState(["", "", "", ""]);
-  const [port, setPort] = useState("3000");
+  const [port, setPort] = useState("");
   const [theme, setTheme] = useState("system");
   const [serverURL, setServerURL] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  // ==========================================
+  // LOAD SETTINGS
+  // ==========================================
 
   useEffect(() => {
-    loadSettings();
+    loadData();
   }, []);
 
-  const loadSettings = async () => {
+  const loadData = async () => {
     try {
-      const savedIP = await getServerIP();
-      const savedPort = await getServerPort();
-      const savedTheme = await getTheme();
-      const savedURL = await getServerURL();
+      setLoading(true);
 
-      if (savedIP) {
-        setIpParts(savedIP.split("."));
-      }
+      const settings = await loadSettings();
 
-      if (savedPort) {
-        setPort(savedPort);
-      }
-
-      if (savedTheme) {
-        setTheme(savedTheme);
-      }
-
-      if (savedURL) {
-        setServerURL(savedURL);
-      }
+      setIpParts(settings.ipParts);
+      setPort(settings.port);
+      setTheme(settings.theme);
+      setServerURL(settings.serverURL);
     } catch (error) {
       console.error("Load settings error:", error);
+    } finally {
+      setLoading(false);
     }
   };
+
+  // ==========================================
+  // THEME
+  // ==========================================
 
   const handleThemeChange = async (value) => {
     setTheme(value);
-    await saveTheme(value);
+
+    const saved = await updateTheme(value);
+
+    if (!saved) {
+      Alert.alert("Error", "Theme save nahi ho saki.");
+    }
   };
+
+  // ==========================================
+  // SAVE SERVER
+  // ==========================================
 
   const handleSave = async () => {
-    const validIP =
-      ipParts.length === 4 &&
-      ipParts.every(
-        (part) => part !== "" && Number(part) >= 0 && Number(part) <= 255,
-      );
+    try {
+      const result = await saveServer(ipParts, port);
 
-    const validPort = port !== "" && Number(port) >= 1 && Number(port) <= 65535;
+      if (!result.success) {
+        Alert.alert(
+          result.type === "ip"
+            ? "Invalid IP"
+            : result.type === "port"
+              ? "Invalid Port"
+              : "Error",
+          result.message,
+        );
 
-    if (!validIP) {
-      Alert.alert("Invalid IP", "Complete valid IP enter karo.");
-      return;
-    }
+        return;
+      }
 
-    if (!validPort) {
-      Alert.alert("Invalid Port", "Port 1 se 65535 ke darmiyan hona chahiye.");
-      return;
-    }
+      setServerURL(result.url);
 
-    const ip = ipParts.join(".");
-    const saved = await saveServerConfig(ip, port);
+      Alert.alert("Success", `Server save ho gaya:\n${result.url}`);
+    } catch (error) {
+      console.error("Save server error:", error);
 
-    if (saved) {
-      const url = `http://${ip}:${port}`;
-      setServerURL(url);
-
-      Alert.alert("Success", `Server save ho gaya:\n${url}`);
+      Alert.alert("Error", "Server settings save nahi ho sakin.");
     }
   };
+
+  // ==========================================
+  // DELETE SERVER
+  // ==========================================
 
   const handleDelete = async () => {
-    await deleteServerConfig();
+    try {
+      const deleted = await deleteServer();
 
-    setIpParts(["", "", "", ""]);
-    setPort("3000");
-    setServerURL("");
+      if (!deleted) {
+        Alert.alert("Error", "Server settings delete nahi ho sakin.");
 
-    Alert.alert("Success", "Server settings delete ho gayi.");
+        return;
+      }
+
+      setIpParts(["", "", "", ""]);
+
+      setPort("");
+      setServerURL("");
+
+      Alert.alert("Success", "Server settings delete ho gayi.");
+    } catch (error) {
+      console.error("Delete server error:", error);
+    }
   };
+
+  // ==========================================
+  // THEME COLORS
+  // ==========================================
 
   const isDark = theme === "dark";
 
@@ -116,17 +138,46 @@ export default function SettingsScreen() {
     input: isDark ? "#1f1f1f" : "#f8fafc",
   };
 
+  // ==========================================
+  // UI
+  // ==========================================
+
   return (
-    <View style={[styles.container, { backgroundColor: colors.background }]}>
+    <View
+      style={[
+        styles.container,
+        {
+          backgroundColor: colors.background,
+        },
+      ]}
+    >
       <ScrollView
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
       >
-        <Text style={[styles.title, { color: colors.text }]}>Settings</Text>
+        <Text
+          style={[
+            styles.title,
+            {
+              color: colors.text,
+            },
+          ]}
+        >
+          Settings
+        </Text>
 
-        <Text style={[styles.subtitle, { color: colors.secondary }]}>
+        <Text
+          style={[
+            styles.subtitle,
+            {
+              color: colors.secondary,
+            },
+          ]}
+        >
           Configure your server connection
         </Text>
+
+        {/* SERVER CARD */}
 
         <View
           style={[
@@ -137,11 +188,29 @@ export default function SettingsScreen() {
             },
           ]}
         >
-          <Text style={[styles.label, { color: colors.text }]}>Server IP</Text>
+          <Text
+            style={[
+              styles.label,
+              {
+                color: colors.text,
+              },
+            ]}
+          >
+            Server IP
+          </Text>
 
           <IpAddressInput values={ipParts} setValues={setIpParts} />
 
-          <Text style={[styles.label, { color: colors.text }]}>Port</Text>
+          <Text
+            style={[
+              styles.label,
+              {
+                color: colors.text,
+              },
+            ]}
+          >
+            Port
+          </Text>
 
           <TextInput
             value={port}
@@ -150,43 +219,95 @@ export default function SettingsScreen() {
             }
             keyboardType="number-pad"
             maxLength={5}
-            placeholder="3000"
-            placeholderTextColor={colors.secondary}
+            placeholder=""
+            autoCorrect={false}
             style={[
               styles.portInput,
               {
                 color: colors.text,
+
                 backgroundColor: colors.input,
+
                 borderColor: colors.border,
               },
             ]}
           />
 
+          {/* SERVER URL */}
+
           {serverURL ? (
-            <View style={[styles.urlBox, { borderColor: colors.border }]}>
-              <Text style={[styles.urlLabel, { color: colors.secondary }]}>
-                Current Server
+            <View
+              style={[
+                styles.urlBox,
+                {
+                  borderColor: colors.border,
+                },
+              ]}
+            >
+              <Text
+                style={[
+                  styles.urlLabel,
+                  {
+                    color: colors.secondary,
+                  },
+                ]}
+              >
+                Server URL
               </Text>
 
-              <Text style={[styles.url, { color: colors.text }]}>
+              <Text
+                style={[
+                  styles.url,
+                  {
+                    color: colors.text,
+                  },
+                ]}
+                selectable
+              >
                 {serverURL}
               </Text>
             </View>
           ) : null}
 
-          <Pressable onPress={handleSave} style={styles.saveButton}>
+          {/* SAVE */}
+
+          <Pressable
+            onPress={handleSave}
+            disabled={loading}
+            style={({ pressed }) => [
+              styles.saveButton,
+              pressed && styles.buttonPressed,
+            ]}
+          >
             <Text style={styles.saveText}>Save Server</Text>
           </Pressable>
 
+          {/* DELETE */}
+
           <Pressable
             onPress={handleDelete}
-            style={[styles.deleteButton, { borderColor: colors.border }]}
+            style={({ pressed }) => [
+              styles.deleteButton,
+              {
+                borderColor: colors.border,
+              },
+              pressed && styles.buttonPressed,
+            ]}
           >
-            <Text style={[styles.deleteText, { color: colors.text }]}>
+            <Text
+              style={[
+                styles.deleteText,
+                {
+                  color: colors.text,
+                },
+              ]}
+            >
               Delete Server
             </Text>
           </Pressable>
         </View>
+
+        {/* THEME CARD */}
 
         <View
           style={[
@@ -291,5 +412,9 @@ const styles = StyleSheet.create({
   deleteText: {
     fontSize: 16,
     fontWeight: "600",
+  },
+
+  buttonPressed: {
+    opacity: 0.7,
   },
 });
