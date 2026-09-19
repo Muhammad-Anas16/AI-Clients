@@ -3,7 +3,7 @@ import { Text, View, StyleSheet } from "react-native";
 export default function Index() {
   return (
     <View style={styles.container}>
-      <Text>HEllo world</Text>
+      <Text>HEllo world Let start</Text>
     </View>
   );
 }
