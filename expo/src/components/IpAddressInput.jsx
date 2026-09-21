@@ -1,9 +1,13 @@
-import React, { useRef } from "react";
+import { useRef } from "react";
 
 import { View, Text, TextInput, StyleSheet } from "react-native";
 
+import { useTheme } from "../context/ThemeContext";
+
 export default function IpAddressInput({ values, setValues }) {
   const refs = useRef([]);
+
+  const { colors } = useTheme();
 
   const handleChange = (text, index) => {
     const clean = text.replace(/[^0-9]/g, "").slice(0, 3);
@@ -42,13 +46,32 @@ export default function IpAddressInput({ values, setValues }) {
             onKeyPress={(event) => handleKeyPress(event, index)}
             keyboardType="number-pad"
             maxLength={3}
-            style={styles.box}
+            style={[
+              styles.box,
+              {
+                color: colors.text,
+                backgroundColor: colors.input,
+                borderColor: colors.border,
+              },
+            ]}
             textAlign="center"
             selectTextOnFocus
             autoCorrect={false}
+            autoCapitalize="none"
           />
 
-          {index < 3 && <Text style={styles.dot}>.</Text>}
+          {index < 3 ? (
+            <Text
+              style={[
+                styles.dot,
+                {
+                  color: colors.muted,
+                },
+              ]}
+            >
+              .
+            </Text>
+          ) : null}
         </View>
       ))}
     </View>
@@ -69,22 +92,17 @@ const styles = StyleSheet.create({
   },
 
   box: {
-    width: 62,
-    height: 54,
+    width: 58,
+    height: 52,
     borderWidth: 1,
-    borderColor: "#d1d5db",
-    borderRadius: 12,
-    fontSize: 20,
-    fontWeight: "600",
-    backgroundColor: "#f9fafb",
-    color: "#111",
-    textAlign: "center",
+    borderRadius: 13,
+    fontSize: 18,
+    fontWeight: "700",
   },
 
   dot: {
-    fontSize: 24,
+    fontSize: 22,
     fontWeight: "700",
-    marginHorizontal: 5,
-    color: "#111",
+    marginHorizontal: 4,
   },
 });

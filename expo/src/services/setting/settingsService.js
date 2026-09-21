@@ -1,20 +1,39 @@
 import {
   saveServerConfig,
   getServerIP,
-  getServerPort,
-  deleteServerConfig,
-  saveTheme,
   getTheme,
+  deleteServerConfig,
   getServerURL,
+  saveTheme,
+  getWakeWord,
+  saveWakeWord,
+  getUserName,
+  saveUserName,
+  getSystemPrompt,
+  saveSystemPrompt,
 } from "../../utils/ipStorage";
 
+import {
+  DEFAULT_WAKE_WORD,
+  DEFAULT_USER_NAME,
+  DEFAULT_SYSTEM_PROMPT,
+  normalizeAssistantValue,
+} from "../../config/assistantConfig";
+
+const SERVER_PORT = "3000";
+
+// ============================================================
 // LOAD ALL SETTINGS
+// ============================================================
+
 export const loadSettings = async () => {
-  const [ip, port, theme, url] = await Promise.all([
+  const [ip, theme, url, wakeWord, userName, systemPrompt] = await Promise.all([
     getServerIP(),
-    getServerPort(),
     getTheme(),
     getServerURL(),
+    getWakeWord(),
+    getUserName(),
+    getSystemPrompt(),
   ]);
 
   let ipParts = ["", "", "", ""];
@@ -29,13 +48,25 @@ export const loadSettings = async () => {
 
   return {
     ipParts,
-    port: port || "",
-    theme: theme || "system",
+
+    port: SERVER_PORT,
+
+    theme: theme === "dark" ? "dark" : "light",
+
     serverURL: url || "",
+
+    wakeWord: normalizeAssistantValue(wakeWord, DEFAULT_WAKE_WORD),
+
+    userName: normalizeAssistantValue(userName, DEFAULT_USER_NAME),
+
+    systemPrompt: normalizeAssistantValue(systemPrompt, DEFAULT_SYSTEM_PROMPT),
   };
 };
 
+// ============================================================
 // VALIDATE IP
+// ============================================================
+
 export const isValidIP = (ipParts) => {
   return (
     ipParts.length === 4 &&
@@ -45,26 +76,19 @@ export const isValidIP = (ipParts) => {
   );
 };
 
-// VALIDATE PORT
-export const isValidPort = (port) => {
-  if (!port) {
-    return false;
-  }
+// ============================================================
+// BUILD SERVER URL
+// ============================================================
 
-  const number = Number(port);
-
-  return number >= 1 && number <= 65535;
+export const buildServerURL = (ipParts) => {
+  return `http://${ipParts.join(".")}:${SERVER_PORT}`;
 };
 
-// CREATE SERVER URL
-export const buildServerURL = (ipParts, port) => {
-  const ip = ipParts.join(".");
-
-  return `http://${ip}:${port}`;
-};
-
+// ============================================================
 // SAVE SERVER
-export const saveServer = async (ipParts, port) => {
+// ============================================================
+
+export const saveServer = async (ipParts) => {
   if (!isValidIP(ipParts)) {
     return {
       success: false,
@@ -73,17 +97,9 @@ export const saveServer = async (ipParts, port) => {
     };
   }
 
-  if (!isValidPort(port)) {
-    return {
-      success: false,
-      type: "port",
-      message: "Port 1 se 65535 ke darmiyan hona chahiye.",
-    };
-  }
-
   const ip = ipParts.join(".");
 
-  const saved = await saveServerConfig(ip, port);
+  const saved = await saveServerConfig(ip);
 
   if (!saved) {
     return {
@@ -93,29 +109,71 @@ export const saveServer = async (ipParts, port) => {
     };
   }
 
-  const url = buildServerURL(ipParts, port);
-
   return {
     success: true,
     ip,
-    port,
-    url,
+    port: SERVER_PORT,
+    url: buildServerURL(ipParts),
   };
 };
 
+// ============================================================
 // DELETE SERVER
-export const deleteServer = async () => {
-  const deleted = await deleteServerConfig();
+// ============================================================
 
-  return deleted;
+export const deleteServer = async () => {
+  return await deleteServerConfig();
 };
 
-// SAVE THEME
+// ============================================================
+// SAVE ASSISTANT SETTINGS
+// ============================================================
+
+export const saveAssistantSettings = async ({
+  wakeWord,
+  userName,
+  systemPrompt,
+}) => {
+  const cleanWakeWord = normalizeAssistantValue(wakeWord, DEFAULT_WAKE_WORD);
+
+  const cleanUserName = normalizeAssistantValue(userName, DEFAULT_USER_NAME);
+
+  const cleanSystemPrompt = normalizeAssistantValue(
+    systemPrompt,
+    DEFAULT_SYSTEM_PROMPT,
+  );
+
+  const [wakeSaved, userSaved, promptSaved] = await Promise.all([
+    saveWakeWord(cleanWakeWord),
+
+    saveUserName(cleanUserName),
+
+    saveSystemPrompt(cleanSystemPrompt),
+  ]);
+
+  return {
+    success: wakeSaved && userSaved && promptSaved,
+
+    wakeWord: cleanWakeWord,
+
+    userName: cleanUserName,
+
+    systemPrompt: cleanSystemPrompt,
+  };
+};
+
+// ============================================================
+// THEME
+// ============================================================
+
 export const updateTheme = async (theme) => {
   return await saveTheme(theme);
 };
 
-// GET CURRENT SERVER URL
+// ============================================================
+// CURRENT SERVER URL
+// ============================================================
+
 export const getCurrentServerURL = async () => {
   return await getServerURL();
 };

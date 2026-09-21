@@ -1,12 +1,29 @@
-const WalkWordDetector = (result) => {
-  const text = result?.data?.text?.toLowerCase() || "";
+const normalizeText = (value) => {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+};
 
-  const words = text
-    .replace(/[.,!?;:]/g, "")
-    .split(/\s+/)
-    .filter(Boolean);
+const escapeRegExp = (value) => {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+};
 
-  return words.includes("friday") ? "friday" : null;
+const WalkWordDetector = (result, configuredWakeWord = "buddy") => {
+  const text = result?.data?.text || result?.text || result?.transcript || "";
+
+  const cleanText = normalizeText(text);
+
+  const wakeWord = normalizeText(configuredWakeWord);
+
+  if (!cleanText || !wakeWord) {
+    return null;
+  }
+
+  const pattern = new RegExp(`(^|\\s)${escapeRegExp(wakeWord)}(?=\\s|$)`, "i");
+
+  return pattern.test(cleanText) ? wakeWord : null;
 };
 
 export default WalkWordDetector;

@@ -1,9 +1,5 @@
 import { File, Paths } from "expo-file-system";
 
-// ==========================================
-// SAVE WAV FILE
-// ==========================================
-
 export const saveWavFile = async (wavBytes, prefix = "voice") => {
   if (!wavBytes || wavBytes.length === 0) {
     throw new Error("No WAV audio available.");
@@ -13,7 +9,9 @@ export const saveWavFile = async (wavBytes, prefix = "voice") => {
     throw new Error("WAV data must be Uint8Array.");
   }
 
-  const fileName = `${prefix}-${Date.now()}.wav`;
+  const fileName = `${prefix}-${Date.now()}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}.wav`;
 
   const file = new File(Paths.cache, fileName);
 
@@ -30,22 +28,13 @@ export const saveWavFile = async (wavBytes, prefix = "voice") => {
   return file.uri;
 };
 
-// ==========================================
-// PLAYBACK FILE
-// ==========================================
-
 export const saveWavForPlayback = async (wavBytes) => {
   return await saveWavFile(wavBytes, "playback");
 };
 
-
 export const saveWavForVosk = async (wavBytes) => {
   return await saveWavFile(wavBytes, "vosk");
 };
-
-// ==========================================
-// DELETE WAV
-// ==========================================
 
 export const deleteWavFile = async (uri) => {
   if (!uri) {
@@ -57,8 +46,6 @@ export const deleteWavFile = async (uri) => {
 
     if (file.exists) {
       file.delete();
-
-      // console.log("WAV deleted:", uri);
     }
 
     return true;

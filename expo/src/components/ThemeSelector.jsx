@@ -1,67 +1,125 @@
-import React from "react";
 import { View, Text, Pressable, StyleSheet } from "react-native";
 
-const themes = ["light", "dark", "system"];
+import { useTheme } from "../context/ThemeContext";
 
 export default function ThemeSelector({ theme, setTheme }) {
+  const { colors } = useTheme();
+
   return (
     <View>
-      <Text style={styles.label}>Theme</Text>
+      <Text
+        style={[
+          styles.title,
+          {
+            color: colors.text,
+          },
+        ]}
+      >
+        Appearance
+      </Text>
+
+      <Text
+        style={[
+          styles.subtitle,
+          {
+            color: colors.muted,
+          },
+        ]}
+      >
+        Choose your preferred theme.
+      </Text>
 
       <View style={styles.row}>
-        {themes.map((item) => {
-          const active = theme === item;
+        <ThemeOption
+          title="Light"
+          subtitle="Clean & bright"
+          active={theme === "light"}
+          onPress={() => setTheme("light")}
+          colors={colors}
+        />
 
-          return (
-            <Pressable
-              key={item}
-              onPress={() => setTheme(item)}
-              style={[styles.option, active && styles.activeOption]}
-            >
-              <Text style={[styles.optionText, active && styles.activeText]}>
-                {item.charAt(0).toUpperCase() + item.slice(1)}
-              </Text>
-            </Pressable>
-          );
-        })}
+        <ThemeOption
+          title="Dark"
+          subtitle="Deep & focused"
+          active={theme === "dark"}
+          onPress={() => setTheme("dark")}
+          colors={colors}
+        />
       </View>
     </View>
   );
 }
 
+function ThemeOption({ title, subtitle, active, onPress, colors }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={[
+        styles.option,
+        {
+          backgroundColor: active ? colors.accent : colors.elevated,
+          borderColor: active ? colors.accent : colors.border,
+        },
+      ]}
+    >
+      <Text
+        style={[
+          styles.optionTitle,
+          {
+            color: active ? colors.accentText : colors.text,
+          },
+        ]}
+      >
+        {title}
+      </Text>
+
+      <Text
+        style={[
+          styles.optionSubtitle,
+          {
+            color: active ? colors.accentText : colors.muted,
+          },
+        ]}
+      >
+        {subtitle}
+      </Text>
+    </Pressable>
+  );
+}
+
 const styles = StyleSheet.create({
-  label: {
-    fontSize: 16,
-    fontWeight: "600",
-    marginBottom: 10,
+  title: {
+    fontSize: 18,
+    fontWeight: "700",
+  },
+
+  subtitle: {
+    fontSize: 13,
+    marginTop: 4,
+    marginBottom: 16,
   },
 
   row: {
     flexDirection: "row",
-    gap: 8,
+    gap: 10,
   },
 
   option: {
     flex: 1,
-    paddingVertical: 12,
-    alignItems: "center",
+    minHeight: 78,
     borderWidth: 1,
-    borderColor: "#d1d5db",
-    borderRadius: 10,
+    borderRadius: 15,
+    padding: 14,
+    justifyContent: "center",
   },
 
-  activeOption: {
-    backgroundColor: "#111",
-    borderColor: "#111",
+  optionTitle: {
+    fontSize: 15,
+    fontWeight: "700",
   },
 
-  optionText: {
-    color: "#555",
-    fontSize: 14,
-    fontWeight: "500",
-  },
-
-  activeText: {
-    color: "#fff",
+  optionSubtitle: {
+    fontSize: 11,
+    marginTop: 5,
   },
 });
