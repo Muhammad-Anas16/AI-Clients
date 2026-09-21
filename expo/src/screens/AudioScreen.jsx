@@ -1,8 +1,6 @@
-import React from "react";
-
 import { View, Text, StyleSheet, ScrollView } from "react-native";
 
-import AudioRecorder from "../components/vosk/AudioRecorder";
+import AudioRecorder from "../components/audio/AudioRecorder";
 import BottomNavigation from "../components/BottomNavigation";
 
 export default function AudioScreen() {

@@ -17,30 +17,45 @@ import {
   getSpeechThreshold,
   getStopThreshold,
   isVoiceLevel,
-} from "../../services/vosk/voiceDetection";
+} from "../../services/audio/voiceDetection";
 
-import { pcmToWav } from "../../services/vosk/pcmToWav";
-import { saveWavForPlayback } from "../../services/vosk/playPcmRecording";
+import { pcmToWav } from "../../services/audio/pcmToWav";
+
+import {
+  saveWavForPlayback,
+  saveWavForVosk,
+  deleteWavFile,
+} from "../../services/audio/playPcmRecording";
+
+import { transcribeAudio } from "../../axios/api";
 
 export default function AudioRecorder() {
   const [permissionGranted, setPermissionGranted] = useState(false);
+
   const [listening, setListening] = useState(false);
+
   const [voiceDetected, setVoiceDetected] = useState(false);
 
   const [recordingReady, setRecordingReady] = useState(false);
+
   const [playing, setPlaying] = useState(false);
 
   const [duration, setDuration] = useState(0);
+
   const [message, setMessage] = useState(null);
 
   const [playbackUri, setPlaybackUri] = useState(null);
+
+  const [transcript, setTranscript] = useState("");
 
   // ==========================================
   // LIFECYCLE
   // ==========================================
 
   const mountedRef = useRef(false);
+
   const initializingRef = useRef(false);
+
   const finishingRef = useRef(false);
 
   // ==========================================
@@ -50,16 +65,19 @@ export default function AudioRecorder() {
   const streamRef = useRef(null);
 
   // ==========================================
-  // VOICE DETECTION
+  // VOICE STATE
   // ==========================================
 
   const noiseFloorRef = useRef(0);
+
   const speechRef = useRef(false);
 
   const confirmCountRef = useRef(0);
+
   const silenceCountRef = useRef(0);
 
   const speechChunksRef = useRef([]);
+
   const preRollRef = useRef([]);
 
   const speechDurationRef = useRef(0);
@@ -71,14 +89,21 @@ export default function AudioRecorder() {
   const channelsRef = useRef(VOICE_CONFIG.channels);
 
   // ==========================================
+  // FILE REFS
+  // ==========================================
+
+  const playbackUriRef = useRef(null);
+
+  // ==========================================
   // PLAYER
   // ==========================================
 
   const player = useAudioPlayer(playbackUri);
+
   const playerStatus = useAudioPlayerStatus(player);
 
   // ==========================================
-  // PLAYER FINISHED
+  // PLAYER STATUS
   // ==========================================
 
   useEffect(() => {
@@ -86,13 +111,11 @@ export default function AudioRecorder() {
       return;
     }
 
-    if (playerStatus?.didJustFinish) {
-      setPlaying(false);
-    }
-  }, [playerStatus?.didJustFinish]);
+    setPlaying(!!playerStatus?.playing);
+  }, [playerStatus?.playing]);
 
   // ==========================================
-  // FINISH VOICE
+  // FINISH RECORDING
   // ==========================================
 
   const finishVoiceRecording = useCallback(
@@ -107,45 +130,45 @@ export default function AudioRecorder() {
       finishingRef.current = true;
 
       try {
-        // Stop voice state
+        // ====================================
+        // STOP DETECTION STATE
+        // ====================================
+
         speechRef.current = false;
 
         confirmCountRef.current = 0;
+
         silenceCountRef.current = 0;
 
-        // Take snapshot BEFORE clearing
+        // ====================================
+        // SNAPSHOT PCM
+        // ====================================
+
         const chunks = [...speechChunksRef.current];
 
         const recordedDuration = speechDurationRef.current;
 
-        // Clear captured data
+        // Clear recording buffer
         speechChunksRef.current = [];
+
         preRollRef.current = [];
+
         speechDurationRef.current = 0;
 
         if (mountedRef.current) {
           setVoiceDetected(false);
         }
 
-        console.log(
-          "VOICE END",
-          "Duration:",
-          Math.round(recordedDuration),
-          "ms",
-          "Chunks:",
-          chunks.length,
-        );
-
-        // ======================================
+        // ====================================
         // TOO SHORT
-        // ======================================
+        // ====================================
 
         if (recordedDuration < VOICE_CONFIG.minSpeechMs) {
           console.log("Voice too short - ignored");
 
           if (mountedRef.current) {
             setRecordingReady(false);
-            setPlaybackUri(null);
+
             setDuration(0);
           }
 
@@ -153,43 +176,84 @@ export default function AudioRecorder() {
         }
 
         if (!chunks.length) {
-          console.log("No PCM chunks available");
-
           return false;
         }
 
-        // ======================================
-        // PCM -> WAV Uint8Array
-        // ======================================
+        // ====================================
+        // PCM -> WAV
+        // ====================================
 
         const wavBytes = pcmToWav(chunks, sampleRate, channels);
+        // ====================================
+        // REMOVE OLD PLAYBACK FILE
+        // ====================================
 
-        console.log("WAV bytes created:", wavBytes.length);
+        const oldPlayback = playbackUriRef.current;
 
-        // ======================================
-        // SAVE WAV FILE
-        // ======================================
+        if (oldPlayback) {
+          await deleteWavFile(oldPlayback);
 
-        const uri = await saveWavForPlayback(wavBytes);
+          playbackUriRef.current = null;
+        }
 
-        console.log("Playback WAV created:", uri);
+        if (mountedRef.current) {
+          setPlaybackUri(null);
+          setTranscript("");
+        }
+
+        const [newPlaybackUri, voskUri] = await Promise.all([
+          saveWavForPlayback(wavBytes),
+
+          saveWavForVosk(wavBytes),
+        ]);
+        playbackUriRef.current = newPlaybackUri;
+
+        // ====================================
+        // SEND VOSK
+        // ====================================
+
+        let voskResult = null;
+
+        try {
+          voskResult = await transcribeAudio(voskUri);
+
+          console.log("Vosk Result:", voskResult?.data?.text);
+        } finally {
+          await deleteWavFile(voskUri);
+        }
+
+        // ====================================
+        // READ TRANSCRIPT
+        // ====================================
+
+        const text =
+          typeof voskResult === "string"
+            ? voskResult
+            : voskResult?.text || voskResult?.transcript || "";
+
+        // ====================================
+        // UI
+        // ====================================
 
         if (!mountedRef.current) {
           return false;
         }
 
-        // ======================================
-        // SET PLAYBACK SOURCE
-        // ======================================
-
-        setPlaybackUri(uri);
+        setPlaybackUri(newPlaybackUri);
 
         setRecordingReady(true);
-        setPlaying(false);
 
         setDuration(Math.round(recordedDuration));
 
-        setMessage(null);
+        setPlaying(false);
+
+        setTranscript(text);
+
+        if (voskResult?.success === false) {
+          setMessage(voskResult?.message || "Vosk transcription failed.");
+        } else {
+          setMessage(null);
+        }
 
         return true;
       } catch (error) {
@@ -198,7 +262,7 @@ export default function AudioRecorder() {
         if (mountedRef.current) {
           setRecordingReady(false);
 
-          setMessage("Voice recording ready nahi ho saki.");
+          setMessage(error?.message || "Voice recording ready nahi ho saki.");
         }
 
         return false;
@@ -238,14 +302,12 @@ export default function AudioRecorder() {
       // ======================================
 
       if (!speechRef.current) {
-        // Pre-roll
         preRollRef.current.push(data.slice(0));
 
         if (preRollRef.current.length > 4) {
           preRollRef.current.shift();
         }
 
-        // Learn background noise
         noiseFloorRef.current = updateNoiseFloor(noiseFloorRef.current, rms);
 
         const threshold = getSpeechThreshold(noiseFloorRef.current);
@@ -258,14 +320,15 @@ export default function AudioRecorder() {
           confirmCountRef.current = 0;
         }
 
-        // ==================================
-        // VOICE CONFIRMED
-        // ==================================
+        // ====================================
+        // VOICE START
+        // ====================================
 
         if (confirmCountRef.current >= VOICE_CONFIG.startConfirmBuffers) {
           speechRef.current = true;
 
           silenceCountRef.current = 0;
+
           speechDurationRef.current = 0;
 
           startThresholdRef.current = getSpeechThreshold(noiseFloorRef.current);
@@ -273,34 +336,36 @@ export default function AudioRecorder() {
           speechChunksRef.current = [...preRollRef.current, data.slice(0)];
 
           preRollRef.current = [];
+
           confirmCountRef.current = 0;
 
           if (mountedRef.current) {
+            // Stop old playback
+            try {
+              player.pause();
+            } catch {}
+
             setVoiceDetected(true);
 
-            // New recording started
             setRecordingReady(false);
-            setPlaybackUri(null);
 
             setPlaying(false);
-            setDuration(0);
+
+            setTranscript("");
+
             setMessage(null);
+
+            setDuration(0);
           }
 
-          console.log(
-            "VOICE START",
-            "RMS:",
-            rms.toFixed(4),
-            "Threshold:",
-            startThresholdRef.current.toFixed(4),
-          );
+          return;
         }
 
         return;
       }
 
       // ======================================
-      // RECORDING ACTIVE
+      // ACTIVE RECORDING
       // ======================================
 
       speechChunksRef.current.push(data.slice(0));
@@ -310,10 +375,6 @@ export default function AudioRecorder() {
       if (mountedRef.current) {
         setDuration(Math.round(speechDurationRef.current));
       }
-
-      // ======================================
-      // STOP THRESHOLD
-      // ======================================
 
       const stopThreshold = getStopThreshold(startThresholdRef.current);
 
@@ -326,7 +387,7 @@ export default function AudioRecorder() {
       }
 
       // ======================================
-      // MAX RECORDING
+      // MAX LENGTH
       // ======================================
 
       if (speechDurationRef.current >= VOICE_CONFIG.maxSpeechMs) {
@@ -336,14 +397,14 @@ export default function AudioRecorder() {
       }
 
       // ======================================
-      // VOICE END
+      // SILENCE
       // ======================================
 
       if (silenceCountRef.current >= VOICE_CONFIG.silenceBuffers) {
         finishVoiceRecording(sampleRate, channels);
       }
     },
-    [finishVoiceRecording],
+    [finishVoiceRecording, player],
   );
 
   // ==========================================
@@ -367,7 +428,7 @@ export default function AudioRecorder() {
   streamRef.current = stream;
 
   // ==========================================
-  // STREAM STATUS
+  // STREAM STATE
   // ==========================================
 
   useEffect(() => {
@@ -412,6 +473,7 @@ export default function AudioRecorder() {
 
         await setAudioModeAsync({
           allowsRecording: true,
+
           playsInSilentMode: true,
         });
 
@@ -439,7 +501,6 @@ export default function AudioRecorder() {
 
         setListening(true);
 
-        console.log("Voice sensor started - waiting for clear voice");
       } catch (error) {
         console.error("Audio initialization error:", error);
 
@@ -460,11 +521,23 @@ export default function AudioRecorder() {
       speechRef.current = false;
 
       speechChunksRef.current = [];
+
       preRollRef.current = [];
 
       confirmCountRef.current = 0;
+
       silenceCountRef.current = 0;
+
       speechDurationRef.current = 0;
+
+      // Delete playback file
+      const uri = playbackUriRef.current;
+
+      if (uri) {
+        deleteWavFile(uri).catch(() => {});
+
+        playbackUriRef.current = null;
+      }
     };
   }, []);
 
@@ -501,8 +574,6 @@ export default function AudioRecorder() {
       }
 
       setListening(true);
-
-      console.log("Voice sensor started");
     } catch (error) {
       console.error("Start listening error:", error);
 
@@ -518,32 +589,23 @@ export default function AudioRecorder() {
     try {
       const currentStream = streamRef.current;
 
-      // ======================================
-      // SAVE ACTIVE VOICE FIRST
-      // ======================================
-
+      // Save active voice
       if (speechRef.current) {
         await finishVoiceRecording(sampleRateRef.current, channelsRef.current);
       }
-
-      // ======================================
-      // STOP STREAM
-      // ======================================
 
       if (currentStream && currentStream.isStreaming) {
         await currentStream.stop();
       }
 
-      // ======================================
-      // RESET DETECTION
-      // ======================================
-
       speechRef.current = false;
 
       confirmCountRef.current = 0;
+
       silenceCountRef.current = 0;
 
       speechChunksRef.current = [];
+
       preRollRef.current = [];
 
       speechDurationRef.current = 0;
@@ -552,8 +614,6 @@ export default function AudioRecorder() {
         setListening(false);
         setVoiceDetected(false);
       }
-
-      console.log("Voice sensor stopped");
     } catch (error) {
       console.error("Stop listening error:", error);
 
@@ -562,7 +622,7 @@ export default function AudioRecorder() {
   };
 
   // ==========================================
-  // PLAY MY VOICE
+  // PLAY
   // ==========================================
 
   const playRecording = () => {
@@ -579,7 +639,6 @@ export default function AudioRecorder() {
       setPlaying(true);
       setMessage(null);
 
-      console.log("Playing my voice:", playbackUri);
     } catch (error) {
       console.error("Playback error:", error);
 
@@ -655,7 +714,17 @@ export default function AudioRecorder() {
 
         <Text style={styles.format}>PCM • 16 kHz • Mono • Int16</Text>
 
-        {/* RECORDING READY */}
+        {/* TRANSCRIPT */}
+
+        {transcript ? (
+          <View style={styles.transcriptBox}>
+            <Text style={styles.transcriptLabel}>Vosk Transcript</Text>
+
+            <Text style={styles.transcript}>{transcript}</Text>
+          </View>
+        ) : null}
+
+        {/* READY */}
 
         {recordingReady && (
           <View style={styles.readyBox}>
@@ -667,7 +736,7 @@ export default function AudioRecorder() {
           </View>
         )}
 
-        {/* HEAR MY VOICE */}
+        {/* HEAR */}
 
         {recordingReady && !playing && (
           <Pressable style={styles.playButton} onPress={playRecording}>
@@ -784,6 +853,25 @@ const styles = StyleSheet.create({
     color: "#999",
     marginTop: 5,
     marginBottom: 18,
+  },
+
+  transcriptBox: {
+    backgroundColor: "#f8fafc",
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 12,
+  },
+
+  transcriptLabel: {
+    fontSize: 12,
+    color: "#777",
+    marginBottom: 5,
+  },
+
+  transcript: {
+    fontSize: 16,
+    color: "#111",
+    fontWeight: "500",
   },
 
   readyBox: {
