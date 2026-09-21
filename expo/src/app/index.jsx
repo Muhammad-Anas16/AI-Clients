@@ -1,31 +1,54 @@
 import React, { useEffect } from "react";
-import { View, Text, StyleSheet, Button } from "react-native";
+
+import { View, Text, StyleSheet, Button, Alert } from "react-native";
+
 import { router } from "expo-router";
 
 import BottomNavigation from "../components/BottomNavigation";
+
 import {
-  checkPiperStatus,
+  getIp,
   checkServerStatus,
   checkVoskStatus,
-} from "@/axios/status";
-import { getHttp } from "@/axios/status";
+  checkPiperStatus,
+} from "../axios/api";
 
 export default function Index() {
   useEffect(() => {
-    const getRes = async () => {
-      const res = await checkServerStatus();
-      const vosk = await checkVoskStatus();
-      const piper = await checkPiperStatus();
-      // const check = await getHttp();
-      await getHttp();
-      console.log(res?.success ? "server is Connected" : "connect to server");
-      console.log(vosk?.success ? "vosk is Connected" : "connect to vosk");
-      console.log(piper?.success ? "piper is Connected" : "connect to piper");
-      // console.log(check ? check : "Not Found");
-    };
-
-    getRes();
+    checkConnection();
   }, []);
+
+  const checkConnection = async () => {
+    try {
+      const url = await getIp();
+      if (!url) {
+        Alert.alert("Server Connection", "Server is not connected.");
+        return;
+      }
+
+      // SERVER
+      const server = await checkServerStatus();
+      if (!server?.success) {
+        Alert.alert("Server Connection", "Server is not connected.");
+        return;
+      }
+      console.log("Server is Connected");
+
+      // VOSK
+      const vosk = await checkVoskStatus();
+      console.log(
+        vosk?.success ? "Vosk is Connected" : "Vosk is not connected",
+      );
+      // PIPER
+      const piper = await checkPiperStatus();
+
+      console.log(
+        piper?.success ? "Piper is Connected" : "Piper is not connected",
+      );
+    } catch (error) {
+      Alert.alert("Connection", "Server is not connected.");
+    }
+  };
 
   return (
     <View style={styles.container}>
