@@ -382,10 +382,7 @@ export const ListenPiper = async (text) => {
   }
 };
 
-// ==========================================
 // VOSK TRANSCRIPTION
-// ==========================================
-
 export const transcribeAudio = async (wavUri) => {
   try {
     const baseURL = await getIp();
