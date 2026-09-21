@@ -445,8 +445,6 @@ export const transcribeAudio = async (wavUri) => {
       };
     }
 
-    console.log("Vosk HTTP:", response.status);
-
     if (!response.ok) {
       return {
         success: false,

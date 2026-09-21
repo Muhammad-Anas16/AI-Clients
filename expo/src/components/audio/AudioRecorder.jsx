@@ -213,11 +213,20 @@ export default function AudioRecorder() {
         // ====================================
 
         let voskResult = null;
+        let result = null;
 
         try {
           voskResult = await transcribeAudio(voskUri);
+          result = voskResult?.data?.text.split(" ");
 
-          console.log("Vosk Result:", voskResult?.data?.text);
+          console.log(
+            result.includes("jarvis") ||
+              result.includes("friday") ||
+              result.includes("buddy") ||
+              result.includes("bro"),
+          );
+
+          console.log("Vosk :", result);
         } finally {
           await deleteWavFile(voskUri);
         }
@@ -500,7 +509,6 @@ export default function AudioRecorder() {
         }
 
         setListening(true);
-
       } catch (error) {
         console.error("Audio initialization error:", error);
 
@@ -638,7 +646,6 @@ export default function AudioRecorder() {
 
       setPlaying(true);
       setMessage(null);
-
     } catch (error) {
       console.error("Playback error:", error);
 
