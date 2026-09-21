@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { View, Text, Pressable, StyleSheet, Alert } from "react-native";
 
@@ -27,14 +27,108 @@ import {
   deleteWavFile,
 } from "../../services/audio/playPcmRecording";
 
-import { AskLlama, transcribeAudio } from "../../axios/api";
+import { AskLlama, ListenPiper, transcribeAudio } from "../../axios/api";
 
 import WalkWordDetector from "../../utils/walkWordDetector";
 
+// ============================================================
+// CONFIG
+// ============================================================
+
+const PRE_ROLL_BUFFERS = 3;
+
+const AUTO_PLAY_ASSISTANT = true;
+
+const POST_PLAYBACK_IGNORE_MS = 700;
+
+// Agar Piper raw PCM return kare
+// aur WAV header na ho to ye sample rate use hoga.
+const PIPER_SAMPLE_RATE = 22050;
+
+// ============================================================
+// HELPERS
+// ============================================================
+
+const getVoskText = (result) => {
+  const text = result?.data?.text || result?.text || result?.transcript || "";
+
+  return String(text).trim();
+};
+
+const getLlamaAnswer = (result) => {
+  if (typeof result === "string") {
+    return result.trim();
+  }
+
+  return String(
+    result?.data?.answer ||
+      result?.answer ||
+      result?.data?.text ||
+      result?.text ||
+      "",
+  ).trim();
+};
+
+const toUint8Array = (value) => {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+
+  if (value instanceof ArrayBuffer) {
+    return new Uint8Array(value);
+  }
+
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+
+  if (value?.data) {
+    return toUint8Array(value.data);
+  }
+
+  return null;
+};
+
+const isWavFile = (bytes) => {
+  if (!bytes || bytes.length < 12) {
+    return false;
+  }
+
+  const riff = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
+
+  const wave = String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11]);
+
+  return riff === "RIFF" && wave === "WAVE";
+};
+
+const preparePiperWav = (piperResult) => {
+  const bytes = toUint8Array(piperResult);
+
+  if (!bytes || bytes.length === 0) {
+    throw new Error("Piper audio data empty.");
+  }
+
+  // Piper already WAV return kar raha hai
+  if (isWavFile(bytes)) {
+    return bytes;
+  }
+
+  // Piper raw PCM return kar raha hai
+  return pcmToWav([bytes], PIPER_SAMPLE_RATE, 1);
+};
+
+// ============================================================
+// COMPONENT
+// ============================================================
+
 export default function AudioRecorder() {
-  // ==========================================
+  // ==========================================================
   // UI STATE
-  // ==========================================
+  // ==========================================================
 
   const [permissionGranted, setPermissionGranted] = useState(false);
 
@@ -54,15 +148,19 @@ export default function AudioRecorder() {
 
   const [playbackUri, setPlaybackUri] = useState(null);
 
+  const [assistantAudioUri, setAssistantAudioUri] = useState(null);
+
   const [transcript, setTranscript] = useState("");
 
   const [wakeWord, setWakeWord] = useState(null);
 
   const [assistantResponse, setAssistantResponse] = useState("");
 
-  // ==========================================
+  const [activePlayback, setActivePlayback] = useState(null);
+
+  // ==========================================================
   // LIFECYCLE
-  // ==========================================
+  // ==========================================================
 
   const mountedRef = useRef(false);
 
@@ -70,15 +168,17 @@ export default function AudioRecorder() {
 
   const finishingRef = useRef(false);
 
-  // ==========================================
-  // STREAM
-  // ==========================================
+  const processingRef = useRef(false);
+
+  // ==========================================================
+  // AUDIO STREAM
+  // ==========================================================
 
   const streamRef = useRef(null);
 
-  // ==========================================
+  // ==========================================================
   // VOICE DETECTION
-  // ==========================================
+  // ==========================================================
 
   const noiseFloorRef = useRef(0);
 
@@ -100,23 +200,37 @@ export default function AudioRecorder() {
 
   const channelsRef = useRef(VOICE_CONFIG.channels);
 
-  // ==========================================
-  // PLAYBACK FILE
-  // ==========================================
+  // ==========================================================
+  // FILE REFS
+  // ==========================================================
 
-  const playbackUriRef = useRef(null);
+  const recordingUriRef = useRef(null);
 
-  // ==========================================
+  const assistantAudioUriRef = useRef(null);
+
+  // ==========================================================
+  // PLAYBACK
+  // ==========================================================
+
+  const playbackActiveRef = useRef(false);
+
+  const ignoreAudioUntilRef = useRef(0);
+
+  const pendingPlayRef = useRef(false);
+
+  // ==========================================================
   // PLAYER
-  // ==========================================
+  // ==========================================================
 
-  const player = useAudioPlayer(playbackUri);
+  const player = useAudioPlayer(null, {
+    updateInterval: 250,
+  });
 
   const playerStatus = useAudioPlayerStatus(player);
 
-  // ==========================================
-  // PLAYER STATE
-  // ==========================================
+  // ==========================================================
+  // PLAYER STATUS
+  // ==========================================================
 
   useEffect(() => {
     if (!mountedRef.current) {
@@ -124,11 +238,156 @@ export default function AudioRecorder() {
     }
 
     setPlaying(!!playerStatus?.playing);
-  }, [playerStatus?.playing]);
 
-  // ==========================================
+    // Audio load hone ke baad play
+    if (pendingPlayRef.current && playerStatus?.isLoaded) {
+      pendingPlayRef.current = false;
+
+      try {
+        player.volume = 1;
+        player.play();
+      } catch (error) {
+        console.error("Playback error:", error);
+
+        playbackActiveRef.current = false;
+
+        setPlaying(false);
+        setActivePlayback(null);
+
+        setMessage("Audio play nahi ho saki.");
+      }
+    }
+
+    // Player error
+    if (playerStatus?.error) {
+      pendingPlayRef.current = false;
+
+      playbackActiveRef.current = false;
+
+      setPlaying(false);
+      setActivePlayback(null);
+
+      setMessage("Audio play nahi ho saki.");
+    }
+
+    // Playback finish
+    if (playerStatus?.didJustFinish) {
+      pendingPlayRef.current = false;
+
+      playbackActiveRef.current = false;
+
+      ignoreAudioUntilRef.current = Date.now() + POST_PLAYBACK_IGNORE_MS;
+
+      setPlaying(false);
+      setActivePlayback(null);
+    }
+  }, [
+    playerStatus?.playing,
+    playerStatus?.isLoaded,
+    playerStatus?.error,
+    playerStatus?.didJustFinish,
+    player,
+  ]);
+
+  // ==========================================================
+  // STOP PLAYBACK
+  // ==========================================================
+
+  const stopPlayback = useCallback(() => {
+    pendingPlayRef.current = false;
+
+    try {
+      player.pause();
+      player.seekTo(0);
+    } catch (error) {
+      console.error("Stop playback error:", error);
+    }
+
+    playbackActiveRef.current = false;
+
+    ignoreAudioUntilRef.current = Date.now() + 300;
+
+    if (mountedRef.current) {
+      setPlaying(false);
+      setActivePlayback(null);
+    }
+  }, [player]);
+
+  // ==========================================================
+  // DELETE OLD AUDIO FILES
+  // ==========================================================
+
+  const deleteOldAudioFiles = useCallback(async () => {
+    const oldRecording = recordingUriRef.current;
+
+    const oldAssistant = assistantAudioUriRef.current;
+
+    recordingUriRef.current = null;
+
+    assistantAudioUriRef.current = null;
+
+    const files = [oldRecording, oldAssistant].filter(Boolean);
+
+    if (!files.length) {
+      return;
+    }
+
+    await Promise.all(
+      [...new Set(files)].map((uri) => deleteWavFile(uri).catch(() => {})),
+    );
+  }, []);
+
+  // ==========================================================
+  // PLAY SOURCE
+  // ==========================================================
+
+  const playSource = useCallback(
+    (uri, type) => {
+      if (!uri) {
+        return false;
+      }
+
+      try {
+        playbackActiveRef.current = true;
+
+        pendingPlayRef.current = true;
+
+        if (mountedRef.current) {
+          setActivePlayback(type);
+          setPlaying(false);
+          setMessage(null);
+        }
+
+        player.volume = 1;
+
+        player.replace({
+          uri,
+        });
+
+        return true;
+      } catch (error) {
+        console.error("Playback error:", error);
+
+        pendingPlayRef.current = false;
+
+        playbackActiveRef.current = false;
+
+        if (mountedRef.current) {
+          setPlaying(false);
+          setActivePlayback(null);
+
+          setMessage("Audio play nahi ho saki.");
+        }
+
+        return false;
+      }
+    },
+    [player],
+  );
+
+  // ==========================================================
   // FINISH VOICE RECORDING
-  // ==========================================
+  // ==========================================================
 
   const finishVoiceRecording = useCallback(
     async (
@@ -140,11 +399,12 @@ export default function AudioRecorder() {
       }
 
       finishingRef.current = true;
+      processingRef.current = true;
 
       try {
-        // ====================================
+        // ====================================================
         // LOCK VOICE STATE
-        // ====================================
+        // ====================================================
 
         speechRef.current = false;
 
@@ -152,17 +412,17 @@ export default function AudioRecorder() {
 
         silenceCountRef.current = 0;
 
-        // ====================================
+        // ====================================================
         // SNAPSHOT PCM
-        // ====================================
+        // ====================================================
 
         const chunks = [...speechChunksRef.current];
 
         const recordedDuration = speechDurationRef.current;
 
-        // ====================================
+        // ====================================================
         // CLEAR CURRENT BUFFER
-        // ====================================
+        // ====================================================
 
         speechChunksRef.current = [];
 
@@ -176,11 +436,11 @@ export default function AudioRecorder() {
           setMessage(null);
         }
 
-        console.log("VOICE END", Math.round(recordedDuration), "ms");
+        console.log("VOICE END:", Math.round(recordedDuration), "ms");
 
-        // ====================================
+        // ====================================================
         // TOO SHORT
-        // ====================================
+        // ====================================================
 
         if (recordedDuration < VOICE_CONFIG.minSpeechMs) {
           console.log("Voice too short - ignored");
@@ -191,6 +451,7 @@ export default function AudioRecorder() {
             setTranscript("");
             setWakeWord(null);
             setAssistantResponse("");
+            setAssistantAudioUri(null);
             setDuration(0);
           }
 
@@ -205,79 +466,89 @@ export default function AudioRecorder() {
           return false;
         }
 
-        // ====================================
+        // ====================================================
+        // STOP OLD PLAYBACK
+        // ====================================================
+
+        stopPlayback();
+
+        // ====================================================
+        // DELETE OLD FILES
+        // IMPORTANT:
+        // New files create hone se pehle old files delete
+        // ====================================================
+
+        await deleteOldAudioFiles();
+
+        // ====================================================
         // PCM -> WAV
-        // ====================================
+        // ====================================================
 
         const wavBytes = pcmToWav(chunks, sampleRate, channels);
 
-        // ====================================
-        // REMOVE OLD PLAYBACK FILE
-        // ====================================
+        // ====================================================
+        // SAVE USER RECORDING
+        // ====================================================
 
-        const oldPlayback = playbackUriRef.current;
+        const newRecordingUri = await saveWavForPlayback(wavBytes);
 
-        if (oldPlayback) {
-          await deleteWavFile(oldPlayback);
+        recordingUriRef.current = newRecordingUri;
 
-          playbackUriRef.current = null;
+        if (mountedRef.current) {
+          setPlaybackUri(newRecordingUri);
+
+          setRecordingReady(true);
         }
 
-        // ====================================
-        // CREATE TWO FILES
-        // ====================================
+        // ====================================================
+        // SAVE VOSK TEMP FILE
+        // ====================================================
 
-        const [newPlaybackUri, voskUri] = await Promise.all([
-          saveWavForPlayback(wavBytes),
+        const voskUri = await saveWavForVosk(wavBytes);
 
-          saveWavForVosk(wavBytes),
-        ]);
-
-        playbackUriRef.current = newPlaybackUri;
-        // ====================================
-        // VOSK
-        // ====================================
-
-        let voskResult = null;
+        let voskResult;
 
         try {
           voskResult = await transcribeAudio(voskUri);
 
           console.log("Vosk Result:", voskResult?.data?.text);
+
+          if (voskResult?.success === false) {
+            throw new Error(
+              voskResult?.message || "Vosk transcription failed.",
+            );
+          }
         } finally {
-          // Vosk file is temporary
           await deleteWavFile(voskUri);
         }
 
-        // ====================================
+        // ====================================================
         // GET TEXT
-        // ====================================
+        // ====================================================
 
-        const text =
-          voskResult?.data?.text ||
-          voskResult?.text ||
-          voskResult?.transcript ||
-          "";
+        const cleanText = getVoskText(voskResult);
 
-        const cleanText = String(text).trim();
-
-        // ====================================
-        // WAKE WORD
-        // ====================================
-
-        const detectedWakeWord = WalkWordDetector(voskResult);
+        console.log("Transcript:", cleanText);
 
         if (mountedRef.current) {
           setTranscript(cleanText);
-
-          setWakeWord(detectedWakeWord);
         }
+
+        // ====================================================
+        // WAKE WORD
+        // ====================================================
+
+        const detectedWakeWord = WalkWordDetector(voskResult);
 
         console.log("Wake Word:", detectedWakeWord);
 
-        // ====================================
+        if (mountedRef.current) {
+          setWakeWord(detectedWakeWord);
+        }
+
+        // ====================================================
         // NO WAKE WORD
-        // ====================================
+        // ====================================================
 
         if (!detectedWakeWord) {
           console.log("No wake word detected");
@@ -285,7 +556,7 @@ export default function AudioRecorder() {
           if (mountedRef.current) {
             setProcessing(false);
             setRecordingReady(true);
-            setPlaybackUri(newPlaybackUri);
+
             setDuration(Math.round(recordedDuration));
 
             setMessage("Wake word nahi mili.");
@@ -294,74 +565,122 @@ export default function AudioRecorder() {
           return true;
         }
 
-        // ====================================
-        // LIFECYCLE CHECK
-        // ====================================
+        // ====================================================
+        // REMOVE WAKE WORD
+        // ====================================================
 
-        if (!mountedRef.current) {
-          return false;
-        }
+        const escapedWakeWord = String(detectedWakeWord).replace(
+          /[.*+?^${}()|[\]\\]/g,
+          "\\$&",
+        );
 
-        // ====================================
-        // WAKE WORD DETECTED
-        // ====================================
-
-        console.log(`Wake word "${detectedWakeWord}" detected`);
-
-        // Remove wake word from command
         const command = cleanText
-          .replace(new RegExp(`\\b${detectedWakeWord}\\b`, "i"), "")
+          .replace(new RegExp(`\\b${escapedWakeWord}\\b`, "i"), "")
+          .replace(/\s+/g, " ")
           .trim();
 
-        // ====================================
-        // ASK LLAMA
-        // ====================================
+        console.log("Command:", command);
 
-        let llamaResponse = null;
+        // ====================================================
+        // LLAMA
+        // ====================================================
+
+        let llamaResult;
 
         if (command) {
-          console.log("User Command:", command);
-
-          llamaResponse = await AskLlama(command);
+          llamaResult = await AskLlama(command);
         } else {
-          llamaResponse = await AskLlama(
-            `Wake word "${detectedWakeWord}" detected. Give a very short greeting response.`,
+          llamaResult = await AskLlama(
+            `Wake word "${detectedWakeWord}" detected. Give a very short friendly greeting.`,
           );
         }
 
-        console.log("Llama Response:", llamaResponse?.data?.answer);
+        console.log("Llama Response:", llamaResult?.data?.answer);
 
-        // ====================================
-        // EXTRACT LLAMA ANSWER
-        // ====================================
+        if (llamaResult?.success === false) {
+          throw new Error(llamaResult?.message || "Llama is not available.");
+        }
 
-        const answer =
-          typeof llamaResponse === "string"
-            ? llamaResponse
-            : llamaResponse?.data?.answer ||
-              llamaResponse?.answer ||
-              llamaResponse?.data?.text ||
-              llamaResponse?.text ||
-              "";
+        // ====================================================
+        // GET LLAMA ANSWER
+        // ====================================================
 
-        // ====================================
-        // FINAL UI
-        // ====================================
+        const answer = getLlamaAnswer(llamaResult);
+
+        console.log("Llama Answer:", answer);
 
         if (mountedRef.current) {
-          setPlaybackUri(newPlaybackUri);
+          setAssistantResponse(answer);
+        }
 
+        // ====================================================
+        // NO LLAMA ANSWER
+        // ====================================================
+
+        if (!answer) {
+          if (mountedRef.current) {
+            setProcessing(false);
+
+            setMessage("Wake word detected, lekin response nahi mili.");
+          }
+
+          return true;
+        }
+
+        // ====================================================
+        // PIPER
+        // ====================================================
+
+        const piperResult = await ListenPiper(answer);
+
+        if (piperResult?.success === false) {
+          throw new Error(piperResult?.message || "Piper is not available.");
+        }
+
+        // ====================================================
+        // PREPARE PIPER AUDIO
+        // ====================================================
+
+        const piperWav = preparePiperWav(piperResult);
+
+        // ====================================================
+        // SAVE PIPER AUDIO
+        // ====================================================
+
+        const newAssistantAudioUri = await saveWavForPlayback(piperWav);
+
+        assistantAudioUriRef.current = newAssistantAudioUri;
+
+        if (mountedRef.current) {
+          setAssistantAudioUri(newAssistantAudioUri);
+        }
+
+        console.log("Piper audio saved:", newAssistantAudioUri);
+
+        // ====================================================
+        // FINAL UI
+        // ====================================================
+
+        if (mountedRef.current) {
           setRecordingReady(true);
 
           setDuration(Math.round(recordedDuration));
-
-          setAssistantResponse(String(answer).trim());
 
           setProcessing(false);
 
           setPlaying(false);
 
-          setMessage(answer ? "Assistant ready." : "Wake word detected.");
+          setActivePlayback(null);
+
+          setMessage("Assistant ready.");
+        }
+
+        // ====================================================
+        // AUTO PLAY PIPER
+        // ====================================================
+
+        if (AUTO_PLAY_ASSISTANT && newAssistantAudioUri && mountedRef.current) {
+          playSource(newAssistantAudioUri, "assistant");
         }
 
         return true;
@@ -370,7 +689,7 @@ export default function AudioRecorder() {
 
         if (mountedRef.current) {
           setProcessing(false);
-          setRecordingReady(false);
+          setVoiceDetected(false);
 
           setMessage(error?.message || "Voice processing failed.");
         }
@@ -378,18 +697,31 @@ export default function AudioRecorder() {
         return false;
       } finally {
         finishingRef.current = false;
+
+        processingRef.current = false;
       }
     },
-    [],
+    [deleteOldAudioFiles, playSource, stopPlayback],
   );
 
-  // ==========================================
+  // ==========================================================
   // AUDIO BUFFER
-  // ==========================================
+  // ==========================================================
 
   const handleAudioBuffer = useCallback(
     (buffer) => {
-      if (!buffer?.data || !mountedRef.current || finishingRef.current) {
+      if (
+        !buffer?.data ||
+        !mountedRef.current ||
+        finishingRef.current ||
+        processingRef.current ||
+        playbackActiveRef.current
+      ) {
+        return;
+      }
+
+      // Playback ke baad short protection
+      if (Date.now() < ignoreAudioUntilRef.current) {
         return;
       }
 
@@ -407,18 +739,17 @@ export default function AudioRecorder() {
 
       const rms = getRmsLevel(data);
 
-      // ======================================
-      // WAITING
-      // ======================================
+      // ======================================================
+      // WAITING FOR VOICE
+      // ======================================================
 
       if (!speechRef.current) {
         preRollRef.current.push(data.slice(0));
 
-        if (preRollRef.current.length > 4) {
+        if (preRollRef.current.length > PRE_ROLL_BUFFERS) {
           preRollRef.current.shift();
         }
 
-        // Background noise
         noiseFloorRef.current = updateNoiseFloor(noiseFloorRef.current, rms);
 
         const threshold = getSpeechThreshold(noiseFloorRef.current);
@@ -431,11 +762,13 @@ export default function AudioRecorder() {
           confirmCountRef.current = 0;
         }
 
-        // ====================================
+        // ====================================================
         // VOICE START
-        // ====================================
+        // ====================================================
 
         if (confirmCountRef.current >= VOICE_CONFIG.startConfirmBuffers) {
+          stopPlayback();
+
           speechRef.current = true;
 
           silenceCountRef.current = 0;
@@ -444,23 +777,24 @@ export default function AudioRecorder() {
 
           startThresholdRef.current = getSpeechThreshold(noiseFloorRef.current);
 
-          speechChunksRef.current = [...preRollRef.current, data.slice(0)];
+          speechChunksRef.current = [...preRollRef.current];
 
           preRollRef.current = [];
 
           confirmCountRef.current = 0;
 
           if (mountedRef.current) {
-            // Stop previous playback
-            try {
-              player.pause();
-            } catch {}
-
             setVoiceDetected(true);
 
             setRecordingReady(false);
 
             setPlaying(false);
+
+            setActivePlayback(null);
+
+            setPlaybackUri(null);
+
+            setAssistantAudioUri(null);
 
             setTranscript("");
 
@@ -468,9 +802,9 @@ export default function AudioRecorder() {
 
             setAssistantResponse("");
 
-            setMessage(null);
-
             setDuration(0);
+
+            setMessage(null);
           }
 
           console.log("VOICE START");
@@ -481,9 +815,9 @@ export default function AudioRecorder() {
         return;
       }
 
-      // ======================================
+      // ======================================================
       // RECORD ACTIVE
-      // ======================================
+      // ======================================================
 
       speechChunksRef.current.push(data.slice(0));
 
@@ -503,9 +837,9 @@ export default function AudioRecorder() {
         silenceCountRef.current += 1;
       }
 
-      // ======================================
+      // ======================================================
       // MAX LENGTH
-      // ======================================
+      // ======================================================
 
       if (speechDurationRef.current >= VOICE_CONFIG.maxSpeechMs) {
         finishVoiceRecording(sampleRate, channels);
@@ -513,20 +847,20 @@ export default function AudioRecorder() {
         return;
       }
 
-      // ======================================
+      // ======================================================
       // SILENCE
-      // ======================================
+      // ======================================================
 
       if (silenceCountRef.current >= VOICE_CONFIG.silenceBuffers) {
         finishVoiceRecording(sampleRate, channels);
       }
     },
-    [finishVoiceRecording, player],
+    [finishVoiceRecording, stopPlayback],
   );
 
-  // ==========================================
+  // ==========================================================
   // AUDIO STREAM
-  // ==========================================
+  // ==========================================================
 
   const audioStreamResult = useAudioStream({
     sampleRate: VOICE_CONFIG.sampleRate,
@@ -544,19 +878,21 @@ export default function AudioRecorder() {
 
   streamRef.current = stream;
 
-  // ==========================================
+  // ==========================================================
   // STREAM STATUS
-  // ==========================================
+  // ==========================================================
 
   useEffect(() => {
-    if (mountedRef.current) {
-      setListening(isStreaming);
+    if (!mountedRef.current) {
+      return;
     }
+
+    setListening(isStreaming);
   }, [isStreaming]);
 
-  // ==========================================
+  // ==========================================================
   // INITIALIZE
-  // ==========================================
+  // ==========================================================
 
   useEffect(() => {
     mountedRef.current = true;
@@ -591,6 +927,7 @@ export default function AudioRecorder() {
         await setAudioModeAsync({
           allowsRecording: true,
           playsInSilentMode: true,
+          shouldRouteThroughEarpiece: false,
         });
 
         if (cancelled || !mountedRef.current) {
@@ -631,9 +968,18 @@ export default function AudioRecorder() {
 
     return () => {
       cancelled = true;
+
       mountedRef.current = false;
 
       speechRef.current = false;
+
+      processingRef.current = false;
+
+      finishingRef.current = false;
+
+      playbackActiveRef.current = false;
+
+      pendingPlayRef.current = false;
 
       speechChunksRef.current = [];
 
@@ -645,23 +991,36 @@ export default function AudioRecorder() {
 
       speechDurationRef.current = 0;
 
-      // Delete playback file
-      const uri = playbackUriRef.current;
+      const recordingUri = recordingUriRef.current;
 
-      if (uri) {
-        deleteWavFile(uri).catch(() => {});
+      const assistantUri = assistantAudioUriRef.current;
 
-        playbackUriRef.current = null;
+      recordingUriRef.current = null;
+
+      assistantAudioUriRef.current = null;
+
+      if (recordingUri) {
+        deleteWavFile(recordingUri).catch(() => {});
+      }
+
+      if (assistantUri && assistantUri !== recordingUri) {
+        deleteWavFile(assistantUri).catch(() => {});
       }
     };
   }, []);
 
-  // ==========================================
+  // ==========================================================
   // START SENSOR
-  // ==========================================
+  // ==========================================================
 
   const startListening = async () => {
     try {
+      if (processingRef.current) {
+        setMessage("Assistant abhi processing kar raha hai.");
+
+        return;
+      }
+
       setMessage(null);
 
       const currentStream = streamRef.current;
@@ -688,7 +1047,9 @@ export default function AudioRecorder() {
         await currentStream.start();
       }
 
-      setListening(true);
+      if (mountedRef.current) {
+        setListening(true);
+      }
     } catch (error) {
       console.error("Start listening error:", error);
 
@@ -696,18 +1057,17 @@ export default function AudioRecorder() {
     }
   };
 
-  // ==========================================
+  // ==========================================================
   // STOP SENSOR
-  // ==========================================
+  // ==========================================================
 
   const stopListening = async () => {
     try {
-      const currentStream = streamRef.current;
-
-      // Save active voice first
       if (speechRef.current) {
         await finishVoiceRecording(sampleRateRef.current, channelsRef.current);
       }
+
+      const currentStream = streamRef.current;
 
       if (currentStream && currentStream.isStreaming) {
         await currentStream.stop();
@@ -736,9 +1096,9 @@ export default function AudioRecorder() {
     }
   };
 
-  // ==========================================
-  // PLAY MY VOICE
-  // ==========================================
+  // ==========================================================
+  // PLAY USER VOICE
+  // ==========================================================
 
   const playRecording = () => {
     if (!playbackUri) {
@@ -747,39 +1107,26 @@ export default function AudioRecorder() {
       return;
     }
 
-    try {
-      player.seekTo(0);
-      player.play();
-
-      setPlaying(true);
-      setMessage(null);
-    } catch (error) {
-      console.error("Playback error:", error);
-
-      setPlaying(false);
-
-      setMessage("Voice play nahi ho saki.");
-    }
+    playSource(playbackUri, "user");
   };
 
-  // ==========================================
-  // STOP PLAYBACK
-  // ==========================================
+  // ==========================================================
+  // PLAY JARVIS
+  // ==========================================================
 
-  const stopPlayback = () => {
-    try {
-      player.pause();
-      player.seekTo(0);
+  const playAssistantVoice = () => {
+    if (!assistantAudioUri) {
+      Alert.alert("No Assistant Audio", "JARVIS ki voice available nahi hai.");
 
-      setPlaying(false);
-    } catch (error) {
-      console.error("Stop playback error:", error);
+      return;
     }
+
+    playSource(assistantAudioUri, "assistant");
   };
 
-  // ==========================================
+  // ==========================================================
   // UI
-  // ==========================================
+  // ==========================================================
 
   return (
     <View style={styles.container}>
@@ -791,7 +1138,6 @@ export default function AudioRecorder() {
         <View
           style={[
             styles.statusBox,
-
             voiceDetected
               ? styles.voiceDetectedBox
               : processing
@@ -804,7 +1150,6 @@ export default function AudioRecorder() {
           <View
             style={[
               styles.dot,
-
               voiceDetected
                 ? styles.voiceDot
                 : processing
@@ -826,6 +1171,8 @@ export default function AudioRecorder() {
           </Text>
         </View>
 
+        {/* INFO */}
+
         <Text style={styles.info}>
           Clear voice detect hote hi recording automatically start hogi.
         </Text>
@@ -838,13 +1185,13 @@ export default function AudioRecorder() {
 
         {/* WAKE WORD */}
 
-        {wakeWord && (
+        {wakeWord ? (
           <View style={styles.wakeBox}>
             <Text style={styles.wakeLabel}>Wake Word Detected</Text>
 
             <Text style={styles.wakeText}>{wakeWord}</Text>
           </View>
-        )}
+        ) : null}
 
         {/* TRANSCRIPT */}
 
@@ -856,7 +1203,7 @@ export default function AudioRecorder() {
           </View>
         ) : null}
 
-        {/* ASSISTANT RESPONSE */}
+        {/* JARVIS RESPONSE */}
 
         {assistantResponse ? (
           <View style={styles.responseBox}>
@@ -868,7 +1215,7 @@ export default function AudioRecorder() {
 
         {/* RECORDING READY */}
 
-        {recordingReady && (
+        {recordingReady ? (
           <View style={styles.readyBox}>
             <Text style={styles.readyTitle}>Voice recording ready</Text>
 
@@ -876,23 +1223,34 @@ export default function AudioRecorder() {
               Duration: {Math.round(duration / 100) / 10} sec
             </Text>
           </View>
-        )}
+        ) : null}
 
-        {/* PLAY */}
+        {/* USER VOICE */}
 
-        {recordingReady && !playing && (
+        {recordingReady && !playing && playbackUri ? (
           <Pressable style={styles.playButton} onPress={playRecording}>
             <Text style={styles.playText}>▶ Hear My Voice</Text>
           </Pressable>
-        )}
+        ) : null}
+
+        {/* JARVIS VOICE */}
+
+        {assistantAudioUri && !playing ? (
+          <Pressable
+            style={styles.assistantButton}
+            onPress={playAssistantVoice}
+          >
+            <Text style={styles.assistantButtonText}>▶ Hear JARVIS</Text>
+          </Pressable>
+        ) : null}
 
         {/* STOP PLAYBACK */}
 
-        {playing && (
+        {playing ? (
           <Pressable style={styles.stopPlayButton} onPress={stopPlayback}>
             <Text style={styles.stopPlayText}>■ Stop Playback</Text>
           </Pressable>
-        )}
+        ) : null}
 
         {/* SENSOR */}
 
@@ -908,15 +1266,19 @@ export default function AudioRecorder() {
 
         {/* MESSAGE */}
 
-        {message && (
+        {message ? (
           <View style={styles.messageBox}>
             <Text style={styles.messageText}>{message}</Text>
           </View>
-        )}
+        ) : null}
       </View>
     </View>
   );
 }
+
+// ============================================================
+// STYLES
+// ============================================================
 
 const styles = StyleSheet.create({
   container: {
@@ -1098,6 +1460,20 @@ const styles = StyleSheet.create({
 
   playText: {
     color: "#111",
+    fontSize: 16,
+    fontWeight: "600",
+  },
+
+  assistantButton: {
+    backgroundColor: "#111",
+    borderRadius: 14,
+    paddingVertical: 16,
+    alignItems: "center",
+    marginBottom: 12,
+  },
+
+  assistantButtonText: {
+    color: "#fff",
     fontSize: 16,
     fontWeight: "600",
   },
